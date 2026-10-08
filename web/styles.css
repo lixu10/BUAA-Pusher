@@ -19,6 +19,8 @@ button:disabled, select:disabled { cursor: not-allowed; color: var(--muted); }
 .source-row.coming-soon-source { grid-template-columns: 1fr auto 42px; background: #f8f9fb; color: var(--muted); }
 .source-row.active-source { grid-template-columns: minmax(100px,.8fr) minmax(180px,1.3fr) 145px 95px 88px 42px; }
 .source-sync-button { display: inline-flex; align-items: center; gap: 5px; justify-content: center; padding-inline: 8px; }
+.source-name { min-width: 0; }
+.source-mode { display: block; width: 100%; max-width: 148px; height: 34px; margin-top: 6px; padding-inline: 7px; font-size: 12px; }
 .task-tools, .academic-tools { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
 .task-tools select { width: auto; min-width: 110px; }
 .academic-tools { padding: 12px; border: 1px solid var(--line); background: var(--paper); }
@@ -44,6 +46,10 @@ button:disabled, select:disabled { cursor: not-allowed; color: var(--muted); }
   .source-row.active-source { grid-template-columns: minmax(100px,.8fr) minmax(170px,1.3fr) 95px 88px 42px; }
   .active-source .source-last-sync { display: none; }
 }
+@media (max-width: 900px) {
+  .source-row.active-source { grid-template-columns: minmax(0,1fr) 95px 88px 42px; }
+  .source-row.active-source > .source-detail { display: block; grid-column: 1 / -1; grid-row: 2; overflow-wrap: anywhere; }
+}
 @media (max-width: 640px) {
   .source-row.active-source { grid-template-columns: 1fr 85px 42px; }
   .source-row.active-source > .source-detail { display: block; grid-column: 1 / -1; grid-row: 2; overflow-wrap: anywhere; }
@@ -57,7 +63,7 @@ button:disabled, select:disabled { cursor: not-allowed; color: var(--muted); }
 }
 .switch input:disabled + span { cursor: not-allowed; opacity: .5; }
 @media (max-width: 640px) { .source-row.coming-soon-source > .coming-soon-badge { display: inline-block; } }
-button:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid color-mix(in srgb, var(--blue) 35%, transparent); outline-offset: 2px; }
+button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid color-mix(in srgb, var(--blue) 35%, transparent); outline-offset: 2px; }
 
 .auth-screen { min-height: 100vh; display: grid; grid-template-columns: minmax(320px, 1.08fr) minmax(360px, .92fr); background: var(--paper); }
 .auth-brand { position: fixed; z-index: 2; top: 28px; left: 34px; display: flex; align-items: center; gap: 10px; color: white; font-size: 16px; font-weight: 760; }

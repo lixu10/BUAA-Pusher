@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from app.upstream.sso import AuthenticationRequired, BuaaSsoSession
+from app.upstream.webvpn import from_webvpn_url, GATEWAY
 from app.services.academic import in_academic_window
 
 from .base import ConnectorManifest, SourceAdapter
@@ -82,8 +83,8 @@ class JudgeAdapter(SourceAdapter):
     manifest = ConnectorManifest(
         id=id,
         label=label,
-        version="2026-09-19",
-        capabilities=("assignments", "submission_status", "scores"),
+        version="2026-10-08",
+        capabilities=("assignments", "submission_status", "scores", "webvpn"),
         endpoints=(SERVICE_LOGIN, COURSES_URL, ASSIGNMENTS_URL),
         references=(
             "BUAASubnet/UBAA:JudgeClient.kt",
@@ -142,7 +143,9 @@ class JudgeAdapter(SourceAdapter):
 
     @staticmethod
     def _ensure_html(response: Any, label: str) -> None:
-        body, url = response.text, str(response.url)
+        body, url = response.text, from_webvpn_url(str(response.url))
+        if urlparse(url).hostname == GATEWAY:
+            raise AuthenticationRequired("学校 WebVPN 会话已失效，请在 JUDGE 连接中登录")
         if response.status_code == 401 or "sso.buaa.edu.cn/login" in url:
             raise AuthenticationRequired(f"{label}登录状态已失效")
         if "input name=\"execution\"" in body or "统一身份认证" in body:

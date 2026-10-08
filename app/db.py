@@ -95,6 +95,7 @@ class Database:
                     event_count INTEGER NOT NULL DEFAULT 0,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     refresh_interval_minutes INTEGER NOT NULL DEFAULT 60,
+                    network_mode TEXT NOT NULL DEFAULT 'direct',
                     PRIMARY KEY(user_id, id)
                 );
                 CREATE TABLE IF NOT EXISTS reminder_rules (
@@ -240,6 +241,8 @@ class Database:
                 self._connection.execute(
                     "ALTER TABLE user_sources ADD COLUMN refresh_interval_minutes INTEGER NOT NULL DEFAULT 60"
                 )
+            if "network_mode" not in columns:
+                self._connection.execute("ALTER TABLE user_sources ADD COLUMN network_mode TEXT NOT NULL DEFAULT 'direct'")
             # Older health alerts used the vague title “需要处理”, which could
             # be mistaken for a booking action.  Preserve history but make its
             # meaning explicit.
@@ -515,10 +518,13 @@ class Database:
     def update_source_settings(
         self, user_id: int, source_id: str, *, enabled: bool | None = None,
         refresh_interval_minutes: int | None = None,
+        network_mode: str | None = None,
     ) -> dict[str, Any] | None:
         current = self.get_source(user_id, source_id)
         if not current:
             return None
+        if network_mode is not None and (source_id != "judge" or network_mode not in {"direct", "webvpn"}):
+            raise ValueError("此来源不支持该访问模式")
         if enabled is not None:
             self.set_source_enabled(user_id, source_id, enabled)
         if refresh_interval_minutes is not None:
@@ -527,6 +533,11 @@ class Database:
                     "UPDATE user_sources SET refresh_interval_minutes=? WHERE user_id=? AND id=?",
                     (refresh_interval_minutes, user_id, source_id),
                 )
+        if network_mode is not None and network_mode != current.get("network_mode", "direct"):
+            with self._lock, self._connection:
+                self._connection.execute(
+                    "UPDATE user_sources SET network_mode=?,status='not_connected',detail='访问模式已更改，请同步',last_sync_at=NULL "
+                    "WHERE user_id=? AND id=?", (network_mode, user_id, source_id))
         return self.get_source(user_id, source_id)
 
     def due_source_ids(self, user_id: int, at: datetime | None = None) -> list[str]:

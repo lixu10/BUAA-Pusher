@@ -1,5 +1,14 @@
 # 北航 API 调研记录
 
+## 2026-10-08 JUDGE 学校 WebVPN
+
+- 参考 [UBAA VpnCipher](https://github.com/BUAASubnet/UBAA/blob/main/server/src/main/kotlin/cn/edu/ubaa/utils/VpnCipher.kt)、[LocalWebVpnSupport](https://github.com/BUAASubnet/UBAA/blob/main/shared/src/commonMain/kotlin/cn/edu/ubaa/api/local/LocalWebVpnSupport.kt) 与 [JudgeClient](https://github.com/BUAASubnet/UBAA/blob/main/server/src/main/kotlin/cn/edu/ubaa/judge/JudgeClient.kt)。仅兼容学校 WebVPN 协议，不调用 UBAA 服务。
+- 主机使用与上游一致的 AES-CFB 编码，路由为 `https://d.buaa.edu.cn/{http|https}/{encoded-host}/{path}`；保留查询参数、fragment、路径尾斜杠。格式固定值是公开协议常量，不是个人密钥。
+- 登录、验证码、用户中心探活和 JUDGE CAS 换票走同一个 WebVPN 客户端。直连与 WebVPN 会话按程序用户分别隔离，只在内存保存 Cookie，用户不选择保存密码时不新增密码持久化。
+- 每一次跳转都重新规范化，限制目标为 JUDGE、SSO、用户中心与学校 WebVPN。禁止凭据 POST 随 307/308 跳至业务端点；不关闭 TLS 校验，不把 WebVPN 当任意代理。
+- 模式以 JUDGE 来源设置持久化，默认直连；迁移只新增字段，不改动日程、规则、忽略状态和变更基线。失败保留数据，验证码由用户填写。
+- 已验证学校网关匿名登录页能加载统一认证表单。登录、验证码、Cookie 隔离、CAS 跳转和完整 JUDGE 导入链使用隔离模拟响应验证；未在真实账号制造提交、修改学校状态或发送测试通知，云服务器真实账号的完整同步仍需部署后验收。
+
 ## 2026-10-08 规则对比与 SPOC 评分核验
 
 - 连接分别定义二级规则：BYXT 上课提醒/课程变更（含增课和取消）；SPOC 截止/新作业/新评分；JUDGE 截止/新作业。没有统一套用三种类型。

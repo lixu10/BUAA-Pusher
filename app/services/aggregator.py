@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import asyncio
+import httpx
 from datetime import UTC, datetime
 
 from app.adapters.base import SourceAdapter
@@ -75,6 +76,15 @@ class Aggregator:
 
     @staticmethod
     def _error_detail(exc: Exception) -> str:
+        if isinstance(exc, httpx.ConnectTimeout):
+            try:
+                host = exc.request.url.host
+            except RuntimeError:
+                host = "学校服务"
+            hint = "；校外访问可选择 WebVPN" if host == "judge.buaa.edu.cn" else ""
+            return f"连接 {host} 超时{hint}，旧数据已保留"
+        if isinstance(exc, httpx.ReadTimeout):
+            return "学校服务响应超时，旧数据已保留，可单独重试"
         if isinstance(exc, TimeoutError):
             return "同步超时，已保留上次数据，可单独重试"
         message = str(exc).strip()

@@ -398,7 +398,10 @@ function renderSourceRow(source) {
   const interval = Number(source.refresh_interval_minutes ?? 60), syncing = source.syncing || state.syncPending.has(source.id), progress = source.sync_progress;
   const detail = syncing ? `${progress?.phase || "同步中"}${progress?.total ? ` ${progress.completed}/${progress.total}` : "…"}` : !source.enabled ? "已停用" : source.status === "healthy" ? `正常 · ${source.event_count} 项` : (source.detail || "未同步");
   const intervals = [[0, "手动"], [5, "5 分钟"], [15, "15 分钟"], [30, "30 分钟"], [60, "1 小时"], [360, "6 小时"], [1440, "每天"]];
-  return `<div class="source-row active-source"><strong>${esc(source.label)}</strong><span class="source-detail" role="status">${esc(detail)}</span><span class="source-last-sync">${source.last_sync_at ? fmtDate(dateOf(source.last_sync_at), { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "未同步"}</span><select class="source-interval" data-source-interval="${source.id}" aria-label="${esc(source.label)}刷新间隔" ${syncing ? "disabled" : ""}>${intervals.map(([value, label]) => `<option value="${value}" ${interval === value ? "selected" : ""}>${label}</option>`).join("")}</select><button type="button" class="quiet-button source-sync-button" data-source-sync="${source.id}" ${syncing || !source.enabled ? "disabled" : ""}><i class="bi bi-arrow-repeat ${syncing ? "is-spinning" : ""}"></i>${syncing ? "同步中" : "同步"}</button><label class="switch" aria-label="启用${esc(source.label)}"><input type="checkbox" data-source-toggle="${source.id}" ${source.enabled ? "checked" : ""} ${syncing ? "disabled" : ""}><span></span></label></div>`;
+  const vpnMode = source.id === "judge" && source.network_mode === "webvpn";
+  const needsVpnLogin = vpnMode && source.webvpn_login_required && state.school?.school_id && (!state.school.remember_password || source.status === "login_required");
+  const modeSelect = source.id === "judge" ? `<select class="source-mode" data-source-mode="judge" aria-label="JUDGE 作业访问模式" ${syncing ? "disabled" : ""}><option value="direct" ${!vpnMode ? "selected" : ""}>直连（校内）</option><option value="webvpn" ${vpnMode ? "selected" : ""}>学校 WebVPN</option></select>` : "";
+  return `<div class="source-row active-source"><div class="source-name"><strong>${esc(source.label)}</strong>${modeSelect}</div><span class="source-detail" role="status">${esc(detail)}</span><span class="source-last-sync">${source.last_sync_at ? fmtDate(dateOf(source.last_sync_at), { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "未同步"}</span><select class="source-interval" data-source-interval="${source.id}" aria-label="${esc(source.label)}刷新间隔" ${syncing ? "disabled" : ""}>${intervals.map(([value, label]) => `<option value="${value}" ${interval === value ? "selected" : ""}>${label}</option>`).join("")}</select><button type="button" class="quiet-button source-sync-button" ${needsVpnLogin ? 'data-source-webvpn-login' : `data-source-sync="${source.id}"`} ${syncing || !source.enabled ? "disabled" : ""}><i class="bi ${needsVpnLogin ? "bi-shield-lock" : "bi-arrow-repeat"} ${syncing ? "is-spinning" : ""}"></i>${syncing ? "同步中" : needsVpnLogin ? "登录" : "同步"}</button><label class="switch" aria-label="启用${esc(source.label)}"><input type="checkbox" data-source-toggle="${source.id}" ${source.enabled ? "checked" : ""} ${syncing ? "disabled" : ""}><span></span></label></div>`;
 }
 
 function renderConnections() {
@@ -408,6 +411,15 @@ function renderConnections() {
   $("#school-action").addEventListener("click", attached && !needsLogin ? disconnectSchool : openSchoolDialog);
   $("#source-list").innerHTML = [...state.data.sources].sort((a, b) => Number(b.available !== false) - Number(a.available !== false)).map(renderSourceRow).join("");
   $$("[data-source-sync]").forEach((button) => button.addEventListener("click", () => syncSources(button, button.dataset.sourceSync)));
+  $$("[data-source-webvpn-login]").forEach((button) => button.addEventListener("click", () => openSchoolDialog("webvpn")));
+  $$("[data-source-mode]").forEach((select) => select.addEventListener("change", async () => {
+    const selected = select.value; select.disabled = true;
+    try {
+      await api("/api/sources/judge", {method:"PATCH", body:JSON.stringify({network_mode:selected})});
+      await loadDashboard(); toast("访问模式已保存");
+      if (selected === "webvpn" && state.school?.school_id && !state.school.remember_password && state.data.sources.find(s => s.id === "judge")?.webvpn_login_required) await openSchoolDialog("webvpn");
+    } catch (e) { await loadDashboard(); toast(e.message || "保存失败"); }
+  }));
   const syncing = state.data.sources.some((source) => source.syncing);
   $("#source-sync").disabled = syncing || state.syncPending.size > 0;
   $("#source-sync").textContent = syncing ? "同步中…" : "同步全部";
@@ -502,9 +514,13 @@ async function syncSources(button, sourceId = null) {
   finally { selected.forEach((id) => state.syncPending.delete(id)); renderConnections(); }
 }
 
-async function openSchoolDialog() {
+async function openSchoolDialog(networkMode = "direct") {
+  // Click listeners pass an Event; only the explicit string selects WebVPN.
+  const mode = networkMode === "webvpn" ? "webvpn" : "direct";
+  $("#school-form").reset(); $("#school-form [name=network_mode]").value = mode;
+  $("#school-dialog-title").textContent = mode === "webvpn" ? "登录学校 WebVPN" : "连接北航";
   $("#school-error").textContent = ""; $("#captcha-field").hidden = true; if (state.school?.school_id) $("#school-form [name=username]").value = state.school.school_id; $("#school-dialog").showModal();
-  try { const result = await api("/api/school/preload", { method: "POST" }); if (result.captcha_required) { $("#captcha-field").hidden = false; $("#captcha-image").src = `/api/school/captcha/${encodeURIComponent(result.captcha_id)}?t=${Date.now()}`; } } catch (e) { $("#school-error").textContent = e.message; }
+  try { const result = await api(`/api/school/preload?network_mode=${mode}`, { method: "POST" }); if (result.captcha_required) { $("#captcha-field").hidden = false; $("#captcha-image").src = `/api/school/captcha/${encodeURIComponent(result.captcha_id)}?network_mode=${mode}&t=${Date.now()}`; } } catch (e) { $("#school-error").textContent = e.message; }
 }
 async function disconnectSchool() { if (!confirm("断开北航账号？已同步的日程会保留。")) return; await api("/api/school/disconnect", { method: "POST" }); await schoolStateReset(); toast("已断开"); }
 async function schoolStateReset() { const session = await api("/api/session"); state.school = session.school; await loadDashboard(); }
@@ -666,7 +682,7 @@ function bindEvents() {
   $("#add-button").addEventListener("click", () => $("#event-dialog").showModal());
   $$('[data-close]').forEach((button) => button.addEventListener("click", () => $(`#${button.dataset.close}`).close()));
   $("#event-form").addEventListener("submit", async (event) => { event.preventDefault(); const formElement = event.currentTarget; const formData = new FormData(formElement); const values = Object.fromEntries(formData); ["starts_at","ends_at","due_at"].forEach((key) => { if (values[key]) values[key] = new Date(values[key]).toISOString(); else delete values[key]; }); values.all_day = formData.has("all_day"); if (!values.location) delete values.location; try { await api("/api/events", { method: "POST", body: JSON.stringify(values) }); $("#event-dialog").close(); formElement.reset(); await loadDashboard(); toast("日程已保存"); } catch { toast("保存失败"); } });
-  $("#school-form").addEventListener("submit", async (event) => { event.preventDefault(); const formElement = event.currentTarget; const formData = new FormData(formElement); const values = Object.fromEntries(formData); values.remember_password = formData.has("remember_password"); if (!values.captcha) delete values.captcha; try { const result = await api("/api/school/login", { method: "POST", body: JSON.stringify(values) }); if (result.captcha_required) { $("#captcha-field").hidden = false; $("#captcha-image").src = `/api/school/captcha/${encodeURIComponent(result.captcha_id)}?t=${Date.now()}`; return; } $("#school-dialog").close(); formElement.reset(); await loadDashboard(); toast(result.school?.status === "connected" ? "北航账号已连接" : (result.school?.detail || "教务授权未完成")); } catch (e) { $("#school-error").textContent = e.message; } });
+  $("#school-form").addEventListener("submit", async (event) => { event.preventDefault(); const formElement = event.currentTarget; const formData = new FormData(formElement); const values = Object.fromEntries(formData); values.remember_password = formData.has("remember_password"); if (!values.captcha) delete values.captcha; try { const result = await api("/api/school/login", { method: "POST", body: JSON.stringify(values) }); if (result.captcha_required) { $("#captcha-field").hidden = false; $("#captcha-image").src = `/api/school/captcha/${encodeURIComponent(result.captcha_id)}?network_mode=${values.network_mode || "direct"}&t=${Date.now()}`; return; } $("#school-dialog").close(); formElement.reset(); await loadDashboard(); toast(result.network_mode === "webvpn" ? "学校 WebVPN 已登录" : result.school?.status === "connected" ? "北航账号已连接" : (result.school?.detail || "教务授权未完成")); } catch (e) { $("#school-error").textContent = e.message; } });
   $$('[data-alert-tab]').forEach((button) => button.addEventListener("click", () => { $$('[data-alert-tab]').forEach((item) => item.classList.toggle("active", item === button)); $$('[data-alert-panel]').forEach((panel) => panel.classList.toggle("active", panel.dataset.alertPanel === button.dataset.alertTab)); }));
   $("#add-rule-button").addEventListener("click", () => openRuleDialog()); $("#add-action").addEventListener("click", () => addActionRow());
   $("#rule-connection").addEventListener("change", (event) => { renderRuleTypes(event.currentTarget.value); const profile = $("#rule-profile").value; renderProfileSettings(profile); $("#rule-form [name=name]").value = reminderProfiles[profile].name; });

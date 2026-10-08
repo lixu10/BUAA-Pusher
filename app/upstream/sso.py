@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import certifi
+from app.upstream.webvpn import WebVpnClient, from_webvpn_url
 
 
 SSO_URL = "https://sso.buaa.edu.cn/login"
@@ -81,8 +82,11 @@ def parse_login_error(html: str) -> str | None:
 
 
 class BuaaSsoSession:
-    def __init__(self, trust_env: bool = False):
-        self.client = httpx.AsyncClient(
+    def __init__(self, trust_env: bool = False, network_mode: str = "direct"):
+        if network_mode not in {"direct", "webvpn"}:
+            raise ValueError("不支持的访问模式")
+        self.network_mode = network_mode
+        self.client = WebVpnClient(trust_env) if network_mode == "webvpn" else httpx.AsyncClient(
             follow_redirects=True,
             timeout=20,
             trust_env=trust_env,
@@ -97,6 +101,7 @@ class BuaaSsoSession:
         self.iclass_identity: tuple[str, str, str, float] | None = None
         self._form: dict[str, str] = {}
         self._captcha_id: str | None = None
+        self._login_url = SSO_URL
 
     @property
     def authenticated(self) -> bool:
@@ -107,6 +112,12 @@ class BuaaSsoSession:
         response.raise_for_status()
         self._form = parse_login_form(response.text)
         self._captcha_id = parse_captcha_id(response.text)
+        if self.network_mode == "webvpn":
+            from urllib.parse import urlsplit
+            target = urlsplit(from_webvpn_url(str(response.url)))
+            if target.hostname != "sso.buaa.edu.cn" or target.path != "/login" or not self._form.get("execution"):
+                raise LoginFailed("学校 WebVPN 登录入口不可用，请稍后重试")
+            self._login_url = str(response.url)
         return {
             "captcha_required": self._captcha_id is not None,
             "captcha_id": self._captcha_id,
@@ -136,7 +147,7 @@ class BuaaSsoSession:
         if captcha:
             form["captcha"] = captcha
             form["captchaResponse"] = captcha
-        response = await self.client.post(SSO_URL, data=form)
+        response = await self.client.post(self._login_url, data=form)
         error = parse_login_error(response.text)
         if error or ("name=\"execution\"" in response.text and "password" in response.text.lower()):
             self._form = {}

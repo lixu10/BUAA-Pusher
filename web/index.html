@@ -8,7 +8,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://cdn.jsdelivr.net">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-  <link rel="stylesheet" href="/styles.css?v=20261008-3">
+  <link rel="stylesheet" href="/styles.css?v=20261008-4">
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
@@ -144,7 +144,8 @@
 
   <dialog id="school-dialog">
     <form id="school-form">
-      <div class="dialog-head"><div><h2>连接北航</h2><p>使用统一认证账号</p></div><button class="icon-button" type="button" data-close="school-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div>
+      <input type="hidden" name="network_mode" value="direct">
+      <div class="dialog-head"><div><h2 id="school-dialog-title">连接北航</h2></div><button class="icon-button" type="button" data-close="school-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div>
       <label>学号<input name="username" required maxlength="80" autocomplete="username"></label>
       <label>密码<input name="password" type="password" required maxlength="200" autocomplete="current-password"></label>
       <label id="captcha-field" hidden>验证码<div class="captcha-row"><input name="captcha" maxlength="20" autocomplete="off"><img id="captcha-image" alt="验证码"></div></label>
@@ -188,6 +189,6 @@
     <div class="calendar-detail-sheet"><div class="dialog-head"><h2 id="calendar-detail-title"></h2><button type="button" class="icon-button" data-close="calendar-detail-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div><dl id="calendar-detail-body"></dl></div>
   </dialog>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=20261008-3" defer></script>
+  <script src="/app.js?v=20261008-4" defer></script>
 </body>
 </html>

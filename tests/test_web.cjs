@@ -4,6 +4,30 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+test('JUDGE alone offers campus direct and school WebVPN with a dedicated login action', () => {
+  const ui = app();
+  const base = {id:'judge',label:'JUDGE 作业',available:true,enabled:true,status:'healthy',event_count:1};
+  ui.context.fixtureSource = base;
+  let html = ui.run('renderSourceRow(fixtureSource)');
+  assert.match(html, /data-source-mode="judge"/);
+  assert.match(html, /直连（校内）/); assert.match(html, /学校 WebVPN/);
+  assert.match(html, /value="direct" selected/);
+  ui.context.fixtureSource = {...base, network_mode:'webvpn',webvpn_login_required:true};
+  ui.run('state.school = {school_id:"12345678",remember_password:false}');
+  html = ui.run('renderSourceRow(fixtureSource)');
+  assert.match(html, /value="webvpn" selected/);
+  assert.match(html, /data-source-webvpn-login/);
+  assert.doesNotMatch(html, /data-source-sync="judge"/);
+  ui.run('state.school.remember_password = true');
+  assert.match(ui.run('renderSourceRow(fixtureSource)'), /data-source-sync="judge"/);
+  ui.context.fixtureSource = {...base,network_mode:'webvpn',webvpn_login_required:true,status:'login_required'};
+  assert.match(ui.run('renderSourceRow(fixtureSource)'), /data-source-webvpn-login/);
+  ui.context.fixtureSource = {...base,id:'spoc'};
+  assert.doesNotMatch(ui.run('renderSourceRow(fixtureSource)'), /data-source-mode/);
+  ui.context.fixtureSource = {...base,network_mode:'webvpn',syncing:true};
+  assert.match(ui.run('renderSourceRow(fixtureSource)'), /data-source-mode="judge"[^>]*disabled/);
+});
+
 function app() {
   const elements = new Map();
   const node = (selector) => {

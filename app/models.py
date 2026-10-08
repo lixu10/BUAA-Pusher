@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 from datetime import date
 
 import re
@@ -41,6 +41,7 @@ class SchoolLoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=200)
     captcha: str | None = Field(default=None, max_length=20)
     remember_password: bool = False
+    network_mode: Literal["direct", "webvpn"] = "direct"
 
 
 class EventCreate(BaseModel):
@@ -57,6 +58,7 @@ class EventCreate(BaseModel):
 class SourceUpdate(BaseModel):
     enabled: bool | None = None
     refresh_interval_minutes: int | None = Field(default=None, ge=0, le=1440)
+    network_mode: Literal["direct", "webvpn"] | None = None
 
 
 class EventIgnoreUpdate(BaseModel):

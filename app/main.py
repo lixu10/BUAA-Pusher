@@ -6,7 +6,7 @@ import sqlite3
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import Response as RawResponse
@@ -33,7 +33,7 @@ from app.services.rules import RULE_TEMPLATES, RuleEngine
 from app.services.school_sessions import SchoolSessionManager
 from app.services.source_health import source_transition_message
 from app.services.worker import BackgroundWorker
-from app.upstream.sso import LoginFailed
+from app.upstream.sso import LoginFailed, AuthenticationRequired
 
 
 SESSION_COOKIE = "puaa_session"
@@ -165,7 +165,8 @@ async def sync_one(user_id: int, source_id: str) -> int:
     previous = db.get_source(user_id, source_id)
     lock = sync_locks.setdefault(user_id, asyncio.Lock())
     try:
-        school = await school_sessions.get(user_id)
+        vpn_mode = source_id == "judge" and (previous or {}).get("network_mode") == "webvpn"
+        school = await school_sessions.get_webvpn(user_id) if vpn_mode else await school_sessions.get(user_id)
         # Only the common SSO login needs serialization; slow business systems
         # must not block the other sources or notification dispatch.
         async with lock:
@@ -174,6 +175,8 @@ async def sync_one(user_id: int, source_id: str) -> int:
                 if secret and secret.get("remember_password") and secret.get("password_ciphertext"):
                     await school.login(secret["school_id"], vault.decrypt(user_id, secret["password_ciphertext"]))
                 if not school.authenticated:
+                    if vpn_mode:
+                        raise AuthenticationRequired("学校 WebVPN 需要登录，请在 JUDGE 连接中选择登录")
                     db.upsert_school_connection(user_id, {"status": "login_required", "detail": "统一认证会话已失效"})
         if source_id == "judge":
             adapter = JudgeAdapter(school, previous_events=db.list_events(user_id, limit=5000),
@@ -186,6 +189,8 @@ async def sync_one(user_id: int, source_id: str) -> int:
         result = await aggregator.sync()
         current_sources = db.list_sources(user_id)
         current = db.get_source(user_id, source_id)
+        if vpn_mode and current and current["status"] == "login_required":
+            school.user = None  # Next refresh can reauthorize with explicitly saved credentials.
         message = source_transition_message(previous, current) if current else None
         if message:
             await notification_sender.send(user_id, "in_app", None, message[0], message[1])
@@ -201,6 +206,11 @@ async def sync_one(user_id: int, source_id: str) -> int:
         return result.get(source_id, 0)
     except asyncio.CancelledError:
         raise
+    except AuthenticationRequired as exc:
+        label = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "judge": JudgeAdapter}[source_id].label
+        db.upsert_source(user_id, {"id": source_id, "label": label, "status": "login_required",
+            "detail": str(exc), "last_sync_at": now_iso(), "event_count": (previous or {}).get("event_count", 0)})
+        return 0
     except Exception as exc:
         label = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "judge": JudgeAdapter}[source_id].label
         db.upsert_source(user_id, {"id": source_id, "label": label, "status": "error",
@@ -275,17 +285,19 @@ async def logout(request: Request, response: Response, user: dict[str, Any] = De
 
 
 @app.post("/api/school/preload")
-async def school_preload(user: dict[str, Any] = Depends(csrf_user)):
+async def school_preload(network_mode: Literal["direct", "webvpn"] = "direct", user: dict[str, Any] = Depends(csrf_user)):
     try:
-        return await (await school_sessions.get(user["id"])).preload()
+        upstream = await school_sessions.get_webvpn(user["id"]) if network_mode == "webvpn" else await school_sessions.get(user["id"])
+        return await upstream.preload()
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="北航统一认证暂不可达") from exc
+        raise HTTPException(status_code=503, detail="学校 WebVPN 暂不可达" if network_mode == "webvpn" else "北航统一认证暂不可达") from exc
 
 
 @app.get("/api/school/captcha/{captcha_id}")
-async def school_captcha(captcha_id: str, user: dict[str, Any] = Depends(current_user)):
+async def school_captcha(captcha_id: str, network_mode: Literal["direct", "webvpn"] = "direct", user: dict[str, Any] = Depends(current_user)):
     try:
-        content, media_type = await (await school_sessions.get(user["id"])).captcha(captcha_id)
+        upstream = await school_sessions.get_webvpn(user["id"]) if network_mode == "webvpn" else await school_sessions.get(user["id"])
+        content, media_type = await upstream.captcha(captcha_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="验证码获取失败") from exc
     return RawResponse(content=content, media_type=media_type)
@@ -293,16 +305,29 @@ async def school_captcha(captcha_id: str, user: dict[str, Any] = Depends(current
 
 @app.post("/api/school/login")
 async def school_login(payload: SchoolLoginRequest, user: dict[str, Any] = Depends(csrf_user)):
-    upstream = await school_sessions.get(user["id"])
+    vpn_mode = payload.network_mode == "webvpn"
+    existing = db.school_secret(user["id"])
+    if vpn_mode:
+        if not existing or payload.username != existing["school_id"]:
+            raise HTTPException(status_code=422, detail="WebVPN 请使用已连接的学校账号")
+        if (db.get_source(user["id"], "judge") or {}).get("network_mode") != "webvpn":
+            raise HTTPException(status_code=409, detail="请先选择 JUDGE 的 WebVPN 模式")
+    upstream = await school_sessions.get_webvpn(user["id"]) if vpn_mode else await school_sessions.get(user["id"])
     try:
         status = await upstream.login(payload.username, payload.password, payload.captcha)
     except LoginFailed as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=503, detail="北航统一认证暂不可达") from exc
+        raise HTTPException(status_code=503, detail="学校 WebVPN 暂不可达" if vpn_mode else "北航统一认证暂不可达") from exc
     if not status.get("authenticated"):
         return status
     profile = status.get("user") or {}
+    if vpn_mode:
+        if payload.remember_password:
+            db.upsert_school_connection(user["id"], {
+                "remember_password": True, "password_ciphertext": vault.encrypt(user["id"], payload.password)})
+        start_sync(user["id"], {"judge"})
+        return {"authenticated": True, "network_mode": "webvpn", "school": db.school_connection(user["id"])}
     encrypted = vault.encrypt(user["id"], payload.password) if payload.remember_password else None
     db.upsert_school_connection(user["id"], {
         "school_id": payload.username,
@@ -313,6 +338,16 @@ async def school_login(payload: SchoolLoginRequest, user: dict[str, Any] = Depen
         "last_login_at": now_iso(),
         "detail": "",
     })
+    if existing and existing["school_id"] != payload.username:
+        await school_sessions.reset_webvpn(user["id"])
+    if (db.get_source(user["id"], "judge") or {}).get("network_mode") == "webvpn":
+        # Reuse only this explicit login's password, never retain it in memory.
+        # A separate CAPTCHA must be solved by the user; do not reuse the SSO code.
+        try:
+            vpn = await school_sessions.get_webvpn(user["id"])
+            await vpn.login(payload.username, payload.password)
+        except Exception:
+            pass  # Primary SSO login remains valid; the JUDGE source reports its own error.
     start_sync(user["id"], set(ACTIVE_SOURCES))
     return {"authenticated": True, "school": db.school_connection(user["id"])}
 
@@ -342,9 +377,13 @@ def dashboard(user: dict[str, Any] = Depends(current_user)):
             "id": manifest["id"], "label": manifest["label"], "enabled": True,
             "status": "not_connected", "detail": "未连接", "last_sync_at": None,
             "event_count": 0, "refresh_interval_minutes": 60,
+            "network_mode": "direct",
         })
         available = manifest["available"]
         data["sources"].append({**source, "available": available,
+            "webvpn_login_required": bool(manifest["id"] == "judge" and source.get("network_mode") == "webvpn"
+                and not school_sessions.webvpn_authenticated(user["id"])) or bool(manifest["id"] == "judge"
+                and source.get("network_mode") == "webvpn" and source.get("status") == "login_required"),
             "syncing": bool(sync_jobs.get((user["id"], manifest["id"])) and not sync_jobs[(user["id"], manifest["id"])].done()),
             "sync_progress": sync_progress.get((user["id"], manifest["id"])),
             "label": manifest["label"],
@@ -406,10 +445,19 @@ async def sync_source(source_id: str, user: dict[str, Any] = Depends(csrf_user))
 def update_source(source_id: str, payload: SourceUpdate, user: dict[str, Any] = Depends(csrf_user)):
     if source_id not in ACTIVE_SOURCES:
         raise HTTPException(status_code=403, detail="Coming Soon")
+    if payload.network_mode is not None:
+        if source_id != "judge":
+            raise HTTPException(status_code=422, detail="目前仅 JUDGE 支持 WebVPN 模式")
+        running = sync_jobs.get((user["id"], source_id))
+        if running and not running.done():
+            raise HTTPException(status_code=409, detail="请等待当前同步完成后切换访问模式")
+        if db.get_source(user["id"], source_id) is None:
+            db.upsert_source(user["id"], {"id": source_id, "label": JudgeAdapter.label, "status": "not_connected"})
     source = db.update_source_settings(
         user["id"], source_id,
         enabled=payload.enabled,
         refresh_interval_minutes=payload.refresh_interval_minutes,
+        network_mode=payload.network_mode,
     )
     if source is None:
         raise HTTPException(status_code=404, detail="source_not_found")
