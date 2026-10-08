@@ -5,6 +5,7 @@ school hosts needed by JUDGE/SSO are accepted. Cookies remain in memory.
 """
 from __future__ import annotations
 
+import re
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import certifi
@@ -15,6 +16,15 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 GATEWAY = "d.buaa.edu.cn"
 ALLOWED_HOSTS = {"judge.buaa.edu.cn", "sso.buaa.edu.cn", "uc.buaa.edu.cn"}
 HOST_KEY = b"wrdvpnisthebest!"
+
+
+class WebVpnAddressError(ValueError):
+    """Describe a rejected route without retaining URL queries or tickets."""
+
+
+def _host_error(host: str) -> WebVpnAddressError:
+    safe_host = host if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host) else "无法识别"
+    return WebVpnAddressError(f"学校 WebVPN 目标主机未支持：{safe_host}，旧数据已保留")
 
 
 def encode_host(host: str) -> str:
@@ -36,15 +46,17 @@ def from_webvpn_url(url: str) -> str:
             raise ValueError()
         decryptor = Cipher(algorithms.AES(HOST_KEY), modes.CFB(encoded[:16])).decryptor()
         host = (decryptor.update(encoded[16:]) + decryptor.finalize()).decode("ascii")
-        if host not in ALLOWED_HOSTS:
-            raise ValueError()
+        if host not in ALLOWED_HOSTS | {GATEWAY}:
+            raise _host_error(host)
         protocol, _, port = segments[1].partition("-")
         if port and int(port) not in {80, 443}:
-            raise ValueError()
+            raise WebVpnAddressError("学校 WebVPN 跳转端口未支持，旧数据已保留")
         authority = host + (":" + port if port else "")
         return urlunsplit((protocol, authority, "/" + segments[3] if len(segments) == 4 else "", parsed.query, parsed.fragment))
+    except WebVpnAddressError:
+        raise
     except (ValueError, UnicodeError):
-        raise ValueError("不支持的学校 WebVPN 地址") from None
+        raise WebVpnAddressError("学校 WebVPN 主机编码无法解析，旧数据已保留") from None
 
 
 def to_webvpn_url(url: str) -> str:
@@ -52,10 +64,18 @@ def to_webvpn_url(url: str) -> str:
     if parsed.username or parsed.password:
         raise ValueError("WebVPN 地址不能包含凭据")
     if parsed.hostname == GATEWAY:
-        if parsed.scheme != "https" or parsed.port not in {None, 443}:
-            raise ValueError("学校 WebVPN 必须使用 HTTPS")
-        from_webvpn_url(url)  # Validate encoded destinations as well.
-        return url
+        current = url
+        for _ in range(8):
+            gateway = urlsplit(current)
+            if gateway.scheme != "https" or gateway.port not in {None, 443}:
+                raise WebVpnAddressError("学校 WebVPN 必须使用 HTTPS")
+            upstream = from_webvpn_url(current)  # Validate every nested destination.
+            if upstream == current or urlsplit(upstream).hostname != GATEWAY:
+                return current
+            # CAS can wrap its own external gateway callback in an encrypted
+            # gateway route. Unwrap it to the native gateway, never proxy itself.
+            current = upstream
+        raise WebVpnAddressError("学校 WebVPN 自回调嵌套过多，旧数据已保留")
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in ALLOWED_HOSTS:
         raise ValueError("WebVPN 仅允许固定的学校接口")
     if parsed.port not in {None, 80, 443}:

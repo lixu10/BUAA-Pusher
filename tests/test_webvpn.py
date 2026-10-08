@@ -43,6 +43,32 @@ class WebVpnUrlTest(unittest.TestCase):
             with self.assertRaises(AuthenticationRequired):
                 JudgeAdapter._ensure_html(httpx.Response(200, text="login", request=httpx.Request("GET", url)), "JUDGE")
 
+    def test_unwraps_encoded_gateway_callback_without_losing_ticket(self):
+        callback = "https://d.buaa.edu.cn/login?cas_login=true&ticket=fixture-ticket"
+        prefix = "https://d.buaa.edu.cn/https/" + encode_host("d.buaa.edu.cn")
+        wrapped = prefix + "/login?cas_login=true&ticket=fixture-ticket"
+        self.assertEqual(callback, from_webvpn_url(wrapped))
+        self.assertEqual(callback, to_webvpn_url(wrapped))
+        self.assertEqual(callback, to_webvpn_url(prefix + wrapped.removeprefix("https://d.buaa.edu.cn")))
+
+    def test_wrapped_gateway_does_not_bypass_destination_or_tls_validation(self):
+        prefix = "https://d.buaa.edu.cn/https/" + encode_host("d.buaa.edu.cn")
+        for target in [prefix + "/https/" + encode_host("evil.example") + "/",
+                       "https://d.buaa.edu.cn/http/" + encode_host("d.buaa.edu.cn") + "/login"]:
+            with self.assertRaises(ValueError):
+                to_webvpn_url(target)
+
+    def test_rejected_route_errors_are_specific_and_never_include_ticket(self):
+        for payload, protocol, reason in [
+            (encode_host("unsupported.buaa.edu.cn"), "https", "目标主机未支持：unsupported.buaa.edu.cn"),
+            (encode_host("judge.buaa.edu.cn"), "https-8080", "端口未支持"),
+            ("invalid-payload", "https", "主机编码无法解析"),
+        ]:
+            with self.assertRaises(ValueError) as caught:
+                from_webvpn_url(f"https://d.buaa.edu.cn/{protocol}/{payload}/?ticket=private-fixture")
+            self.assertIn(reason, str(caught.exception))
+            self.assertNotIn("private-fixture", str(caught.exception))
+
     def test_timeouts_report_only_host_not_ticket_or_account(self):
         exc = httpx.ConnectTimeout("", request=httpx.Request("GET", "https://judge.buaa.edu.cn/?ticket=private-fixture"))
         text = Aggregator._error_detail(exc)
@@ -53,6 +79,28 @@ class WebVpnUrlTest(unittest.TestCase):
 
 
 class WebVpnTransportTest(unittest.IsolatedAsyncioTestCase):
+    async def test_cas_encoded_gateway_callback_is_followed_as_native_https_get(self):
+        requests = []
+        callback = "https://d.buaa.edu.cn/https/" + encode_host("d.buaa.edu.cn") + "/login?cas_login=true&ticket=fixture-ticket"
+        def handler(request):
+            requests.append(request)
+            if request.method == "POST":
+                return httpx.Response(302, headers={"Location":callback})
+            if request.url.path == "/login":
+                self.assertEqual("fixture-ticket", request.url.params["ticket"])
+                return httpx.Response(302, headers={"Location":"/"})
+            return httpx.Response(200, text="gateway portal")
+        client = WebVpnClient(transport=httpx.MockTransport(handler))
+        try:
+            response = await client.post(SSO_URL, data={"password":"not-a-real-password"})
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(["POST", "GET", "GET"], [r.method for r in requests])
+            self.assertEqual("/login", requests[1].url.path)
+            self.assertTrue(all(r.url.host == "d.buaa.edu.cn" and r.url.scheme == "https" for r in requests))
+            self.assertTrue(all(not r.content for r in requests[1:]))
+        finally:
+            await client.aclose()
+
     async def test_judge_sync_chooses_vpn_session_without_direct_login(self):
         db = Database(":memory:"); db.init()
         user = db.create_user("route@example.com", "Route", "hash")
@@ -173,7 +221,7 @@ class WebVpnTransportTest(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200)
             if request.method == "POST":
                 self.assertEqual(form_url, str(request.url))
-                return httpx.Response(302, headers={"Location":"https://d.buaa.edu.cn/"})
+                return httpx.Response(302, headers={"Location":"https://d.buaa.edu.cn/https/" + encode_host("d.buaa.edu.cn") + "/"})
             if request.url.path == "/":
                 return httpx.Response(200, text="gateway portal")
             if str(request.url) != form_url:

@@ -2,6 +2,8 @@
 
 ## 2026-10-08 JUDGE 学校 WebVPN
 
+- 校方 CAS 可能将 `d.buaa.edu.cn` 自回调再次包入加密代理路径。需要识别并还原为原生 HTTPS 网关地址，保留回调参数；嵌套回调每层仍校验目标，禁止借此绕过主机白名单或 TLS 校验。错误原因仅显示主机/编码/端口类型，不输出完整地址、票据或 Cookie。
+
 - 参考 [UBAA VpnCipher](https://github.com/BUAASubnet/UBAA/blob/main/server/src/main/kotlin/cn/edu/ubaa/utils/VpnCipher.kt)、[LocalWebVpnSupport](https://github.com/BUAASubnet/UBAA/blob/main/shared/src/commonMain/kotlin/cn/edu/ubaa/api/local/LocalWebVpnSupport.kt) 与 [JudgeClient](https://github.com/BUAASubnet/UBAA/blob/main/server/src/main/kotlin/cn/edu/ubaa/judge/JudgeClient.kt)。仅兼容学校 WebVPN 协议，不调用 UBAA 服务。
 - 主机使用与上游一致的 AES-CFB 编码，路由为 `https://d.buaa.edu.cn/{http|https}/{encoded-host}/{path}`；保留查询参数、fragment、路径尾斜杠。格式固定值是公开协议常量，不是个人密钥。
 - 登录、验证码、用户中心探活和 JUDGE CAS 换票走同一个 WebVPN 客户端。直连与 WebVPN 会话按程序用户分别隔离，只在内存保存 Cookie，用户不选择保存密码时不新增密码持久化。
