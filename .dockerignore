@@ -1,0 +1,14 @@
+**
+!requirements.txt
+!app/
+!app/**/*.py
+!web/
+!web/**
+**/__pycache__/
+**/*.py[cod]
+**/.env*
+**/*.db*
+**/*.sqlite*
+**/*.log
+**/*.pem
+**/*.key

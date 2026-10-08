@@ -1,0 +1,1 @@
+"""PUAA Reminder application package."""

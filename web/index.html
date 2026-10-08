@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101c30">
+  <title>PUAA</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://cdn.jsdelivr.net">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="/styles.css?v=20261008-3">
+</head>
+<body>
+  <section class="auth-screen" id="auth-screen">
+    <div class="auth-brand"><span class="brand-mark">P</span><span>PUAA</span></div>
+    <div class="auth-sheet">
+      <div class="auth-heading">
+        <span class="term-line">2026 · 秋季学期</span>
+        <h1>一天的事，<br>放在一张表里。</h1>
+      </div>
+      <form class="auth-form" id="account-form">
+        <div class="auth-tabs" role="tablist">
+          <button type="button" class="auth-tab active" data-auth-mode="login">登录</button>
+          <button type="button" class="auth-tab" data-auth-mode="register">注册</button>
+        </div>
+        <label class="register-only" hidden>昵称<input name="display_name" maxlength="40" autocomplete="name"></label>
+        <label>邮箱<input name="email" type="email" required autocomplete="email"></label>
+        <label>密码<input name="password" type="password" required autocomplete="current-password"></label>
+        <p class="form-hint register-only" hidden>至少 10 位，包含字母和数字或符号</p>
+        <button class="primary-button wide" type="submit"><span id="account-submit-label">登录</span><i class="bi bi-arrow-right"></i></button>
+        <p class="form-error" id="account-error" role="alert"></p>
+      </form>
+    </div>
+  </section>
+
+  <section class="app-shell" id="app-shell" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="#today"><span class="brand-mark">P</span><span>PUAA</span></a>
+      <nav class="nav" aria-label="产品导航">
+        <a class="nav-item active" href="#today" data-page="today"><i class="bi bi-sun"></i><span>今日</span></a>
+        <a class="nav-item" href="#calendar" data-page="calendar"><i class="bi bi-calendar3"></i><span>日历</span></a>
+        <a class="nav-item" href="#tasks" data-page="tasks"><i class="bi bi-list-check"></i><span>待办</span></a>
+        <a class="nav-item" href="#alerts" data-page="alerts"><i class="bi bi-bell"></i><span>提醒</span></a>
+        <a class="nav-item" href="#connections" data-page="connections"><i class="bi bi-plug"></i><span>连接</span></a>
+        <a class="nav-item" href="#channels" data-page="channels"><i class="bi bi-send"></i><span>通知渠道</span></a>
+      </nav>
+      <button class="user-button" id="user-button" type="button"><span class="user-avatar" id="user-avatar"></span><span><strong id="user-name"></strong><small id="school-state">未连接北航</small></span></button>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="date-nav">
+          <button class="icon-button" id="previous-period" type="button" aria-label="前一天"><i class="bi bi-chevron-left"></i></button>
+          <h1 id="period-title">今天</h1>
+          <button class="icon-button" id="next-period" type="button" aria-label="后一天"><i class="bi bi-chevron-right"></i></button>
+          <button class="quiet-button" id="today-button" type="button">今天</button>
+        </div>
+        <div class="top-actions">
+          <label class="check-row visibility-control"><input type="checkbox" id="show-completed"><span>显示已完成</span></label>
+          <button class="icon-button" id="sync-button" aria-label="同步"><i class="bi bi-arrow-repeat"></i></button>
+          <button class="quiet-button" id="add-button" type="button" disabled><span>自定义日程 · Coming Soon</span></button>
+        </div>
+      </header>
+
+      <section class="page active" id="page-today">
+        <div class="context-line"><strong id="today-label"></strong><span id="source-summary">尚未同步</span></div>
+        <div class="today-summary" id="today-summary"></div>
+        <div class="today-layout">
+          <section class="day-sheet" aria-label="今日时间线"><div id="today-timeline"></div></section>
+          <aside class="deadline-rail"><div class="section-label">未来 7 天截止</div><div id="deadline-list"></div></aside>
+        </div>
+      </section>
+
+      <section class="page" id="page-calendar">
+        <div class="calendar-tools">
+          <div class="view-tabs" role="tablist" aria-label="日历视图">
+            <button data-view="day">日</button><button data-view="week" class="active">周</button><button data-view="month">月</button>
+          </div>
+          <div id="week-time-tools" class="week-time-tools" role="group" aria-label="定位时间"><span>0–24 点</span><button type="button" class="quiet-button" data-week-hour="0">0 点</button><button type="button" class="quiet-button" data-week-hour="8">8 点</button><button type="button" class="quiet-button" data-week-hour="18">18 点</button></div>
+          <span id="event-count"></span>
+        </div>
+        <div id="calendar-canvas" class="calendar-canvas" tabindex="0" role="region" aria-label="日历日程"></div>
+      </section>
+
+      <section class="page" id="page-tasks">
+        <div class="page-heading"><h2>待办</h2><span id="task-count"></span></div>
+        <div class="task-tools">
+          <div class="view-tabs"><button data-task-status="incomplete" class="active">待处理</button><button data-task-status="any">全部</button><button data-task-status="submitted">已提交</button><button data-task-status="partial">部分提交</button><button data-task-status="unknown">状态未知</button><button data-task-status="ignored">已忽略</button></div>
+          <select id="task-source" aria-label="待办来源"><option value="">全部来源</option><option value="spoc">SPOC</option><option value="judge">JUDGE</option><option value="byxt">课程提醒</option></select>
+          <select id="task-type" aria-label="作业类型"><option value="">全部类型</option></select>
+          <label class="check-row"><input type="checkbox" id="task-history"><span>显示已过期</span></label>
+        </div>
+        <small class="academic-caption" id="task-academic-summary"></small>
+        <div class="list-surface" id="task-list"></div>
+      </section>
+
+      <section class="page" id="page-alerts">
+        <div class="page-heading"><h2>提醒</h2><button class="primary-button" id="add-rule-button"><i class="bi bi-plus-lg"></i>新建规则</button></div>
+        <div class="subtabs" role="tablist"><button class="active" data-alert-tab="rules">规则</button><button data-alert-tab="triggers">计划</button><button data-alert-tab="deliveries">发送记录</button><button data-alert-tab="inbox">站内通知</button></div>
+        <div class="alert-panel active" data-alert-panel="rules"><div class="rule-workspace" id="rule-list"></div></div>
+        <div class="alert-panel" data-alert-panel="triggers"><div class="list-surface" id="trigger-list"></div></div>
+        <div class="alert-panel" data-alert-panel="deliveries"><div class="list-surface" id="delivery-list"></div></div>
+        <div class="alert-panel" data-alert-panel="inbox"><div class="list-surface" id="inbox-list"></div></div>
+      </section>
+
+      <section class="page" id="page-channels">
+        <div class="page-heading"><h2>通知渠道</h2><button class="primary-button" id="add-channel-button"><i class="bi bi-plus-lg"></i>添加渠道</button></div>
+        <div class="channel-grid" id="channel-list"></div>
+      </section>
+
+      <section class="page" id="page-connections">
+        <div class="page-heading"><h2>连接</h2><button class="quiet-button" id="source-sync">同步全部</button></div>
+        <section class="connection-primary" id="school-connection"></section>
+        <div class="source-list" id="source-list"></div>
+      </section>
+
+      <section class="page" id="page-account">
+        <div class="page-heading"><h2>账户与安全</h2></div>
+        <div class="account-panel"><div><strong id="account-name"></strong><span id="account-email"></span></div><button class="danger-button" id="logout-button">退出登录</button></div>
+        <form class="preferences-panel" id="preferences-form"><div><strong>安静时段</strong><span>规则可选择延后、跳过或忽略</span></div><label>开始<input type="time" name="quiet_start"></label><label>结束<input type="time" name="quiet_end"></label><button class="quiet-button" type="submit">保存</button></form>
+        <h3 class="settings-heading">学期范围</h3>
+        <form id="academic-form" class="academic-tools">
+          <label class="check-row"><input type="checkbox" name="academic_filter_enabled" checked><span>学期过滤</span></label>
+          <select name="academic_mode" aria-label="学期模式"><option value="auto">自动学期</option><option value="custom">自定义范围</option></select>
+          <label>开始<input type="date" name="academic_start_date"></label>
+          <label>结束（不含）<input type="date" name="academic_end_date"></label>
+          <button type="submit" class="quiet-button">保存</button><small id="academic-range"></small>
+        </form>
+      </section>
+    </main>
+  </section>
+
+  <dialog id="event-dialog">
+    <form id="event-form">
+      <div class="dialog-head"><h2>新建日程</h2><button class="icon-button" type="button" data-close="event-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div>
+      <label>名称<input name="title" required maxlength="120" autocomplete="off"></label>
+      <div class="form-row"><label>类型<select name="kind"><option value="custom">日程</option><option value="assignment">待办/作业</option><option value="exam">考试</option><option value="booking">预约</option></select></label><label class="check-row"><input name="all_day" type="checkbox"><span>全天</span></label></div>
+      <div class="form-row"><label>开始<input name="starts_at" type="datetime-local"></label><label>结束<input name="ends_at" type="datetime-local"></label></div>
+      <label>截止<input name="due_at" type="datetime-local"></label>
+      <label>地点<input name="location" maxlength="120" autocomplete="off"></label>
+      <div class="dialog-actions"><button class="quiet-button" type="button" data-close="event-dialog">取消</button><button class="primary-button" type="submit">保存</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="school-dialog">
+    <form id="school-form">
+      <div class="dialog-head"><div><h2>连接北航</h2><p>使用统一认证账号</p></div><button class="icon-button" type="button" data-close="school-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div>
+      <label>学号<input name="username" required maxlength="80" autocomplete="username"></label>
+      <label>密码<input name="password" type="password" required maxlength="200" autocomplete="current-password"></label>
+      <label id="captcha-field" hidden>验证码<div class="captcha-row"><input name="captcha" maxlength="20" autocomplete="off"><img id="captcha-image" alt="验证码"></div></label>
+      <label class="check-row"><input name="remember_password" type="checkbox"><span>加密保存，用于自动同步</span></label>
+      <p class="form-error" id="school-error" role="alert"></p>
+      <div class="dialog-actions"><button class="quiet-button" type="button" data-close="school-dialog">取消</button><button class="primary-button" type="submit">连接</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="rule-dialog" class="wide-dialog rule-editor">
+    <form id="rule-form">
+      <input type="hidden" name="rule_id">
+      <input type="hidden" name="rule_enabled" value="true">
+      <div class="dialog-head"><h2 id="rule-dialog-title">新建提醒</h2><button class="icon-button" type="button" data-close="rule-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div>
+      <div class="rule-editor-body">
+      <div class="rule-identity">
+        <label class="rule-field"><span>连接</span><select name="connection" id="rule-connection"><option value="byxt">课程提醒</option><option value="spoc" selected>SPOC 作业</option><option value="judge">JUDGE 作业</option><option value="assignments" hidden>SPOC + JUDGE（旧规则）</option><option disabled>课程签到 · Coming Soon</option><option disabled>图书馆 · Coming Soon</option><option disabled>其他连接 · Coming Soon</option></select></label>
+        <label class="rule-field"><span>规则类型</span><select name="profile" id="rule-profile"></select></label>
+        <label class="rule-field"><span>名称</span><input name="name" required maxlength="80" autocomplete="off"></label>
+      </div>
+      <fieldset id="rule-settings-fieldset"><legend id="rule-settings-title">提醒设置</legend><div id="profile-settings"></div></fieldset>
+      <fieldset><legend>通知方式</legend><div id="action-list"></div><button class="inline-button" id="add-action" type="button"><i class="bi bi-plus"></i>添加通知方式</button></fieldset>
+      <fieldset><legend>安静时段</legend><div class="choice-grid"><label><input type="radio" name="quiet_policy" value="delay" checked>延后发送</label><label><input type="radio" name="quiet_policy" value="skip">跳过</label><label><input type="radio" name="quiet_policy" value="ignore">照常发送</label></div></fieldset>
+      <p class="form-error" id="rule-error"></p>
+      </div>
+      <div class="dialog-actions"><button class="danger-button" id="delete-rule-button" type="button" hidden>删除</button><span class="dialog-spacer"></span><button class="quiet-button" type="button" data-close="rule-dialog">取消</button><button class="primary-button" type="submit">保存规则</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="channel-dialog">
+    <form id="channel-form">
+      <div class="dialog-head"><div><h2>添加通知渠道</h2><p>敏感配置加密保存</p></div><button class="icon-button" type="button" data-close="channel-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div>
+      <label>类型<select name="type"><option value="email">邮件 SMTP</option><option value="sms_webhook">自定义短信 Webhook</option><option value="wxpusher">WxPusher</option><option value="telegram">Telegram</option></select></label>
+      <label>名称<input name="name" required maxlength="80" placeholder="如 我的邮箱"></label>
+      <div id="channel-fields"></div><p class="form-error" id="channel-error"></p>
+      <div class="dialog-actions"><button class="quiet-button" type="button" data-close="channel-dialog">取消</button><button class="primary-button" type="submit">保存渠道</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="calendar-detail-dialog" aria-labelledby="calendar-detail-title">
+    <div class="calendar-detail-sheet"><div class="dialog-head"><h2 id="calendar-detail-title"></h2><button type="button" class="icon-button" data-close="calendar-detail-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div><dl id="calendar-detail-body"></dl></div>
+  </dialog>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/app.js?v=20261008-3" defer></script>
+</body>
+</html>

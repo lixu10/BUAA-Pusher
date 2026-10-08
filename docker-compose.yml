@@ -1,0 +1,40 @@
+services:
+  puaa:
+    build: .
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    ports:
+      - "${PUAA_BIND_HOST:-127.0.0.1}:${PUAA_COMPOSE_PORT:-11451}:8000"
+    environment:
+      PUAA_HOST: 0.0.0.0
+      PUAA_PORT: 8000
+      PUAA_DATABASE: /app/data/puaa.db
+      PUAA_SESSION_DAYS: "${PUAA_SESSION_DAYS:-30}"
+      PUAA_MASTER_KEY: "${PUAA_MASTER_KEY:-}"
+      PUAA_SECURE_COOKIES: "${PUAA_SECURE_COOKIES:-false}"
+      PUAA_SYNC_INTERVAL_SECONDS: "${PUAA_SYNC_INTERVAL_SECONDS:-900}"
+      PUAA_TRUST_ENV_PROXY: "${PUAA_TRUST_ENV_PROXY:-false}"
+    volumes:
+      - puaa_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/api/health',timeout=5); assert json.load(r)['status']=='ok'"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  puaa_data:
