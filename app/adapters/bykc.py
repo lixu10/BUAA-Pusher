@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives.asymmetric import padding as asymmetric_padd
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.upstream.sso import AuthenticationRequired, BuaaSsoSession
+from app.upstream.webvpn import from_webvpn_url
 
 from .base import ConnectorManifest, SourceAdapter
 
@@ -91,7 +92,7 @@ class BykcAdapter(SourceAdapter):
         if token:
             self.token = token
             return
-        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired("博雅系统授权未完成")
         try:
             await self.session.client.get(FALLBACK_LOGIN_URL)
@@ -115,7 +116,7 @@ class BykcAdapter(SourceAdapter):
         response = await self.session.client.post(
             f"{API_BASE}/{api_name}", content=encrypted.body, headers=headers
         )
-        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired("博雅系统会话已失效")
         if response.status_code != 200:
             raise RuntimeError(f"博雅系统返回 {response.status_code}")

@@ -243,6 +243,20 @@ class Database:
                 )
             if "network_mode" not in columns:
                 self._connection.execute("ALTER TABLE user_sources ADD COLUMN network_mode TEXT NOT NULL DEFAULT 'direct'")
+            self._connection.executescript("""
+                CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS attendance_check_results (
+                    user_id INTEGER NOT NULL REFERENCES puaa_users(id) ON DELETE CASCADE,
+                    check_key TEXT NOT NULL, result TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL, PRIMARY KEY(user_id,check_key)
+                );
+            """)
+            if not self._one("SELECT name FROM schema_migrations WHERE name='attendance-check-v1'", ()):
+                self._connection.execute("UPDATE user_sources SET enabled=0 WHERE id='iclass'")
+                self._connection.execute("INSERT INTO schema_migrations(name) VALUES('attendance-check-v1')")
+            trigger_columns = {r["name"] for r in self._connection.execute("PRAGMA table_info(scheduled_triggers)")}
+            if "check_key" not in trigger_columns:
+                self._connection.execute("ALTER TABLE scheduled_triggers ADD COLUMN check_key TEXT")
             # Older health alerts used the vague title “需要处理”, which could
             # be mistaken for a booking action.  Preserve history but make its
             # meaning explicit.
@@ -263,7 +277,8 @@ class Database:
                 )
             preference_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(user_preferences)")}
             for name, definition in [("academic_filter_enabled", "INTEGER NOT NULL DEFAULT 1"),
-                                     ("academic_start_date", "TEXT"), ("academic_end_date", "TEXT")]:
+                                     ("academic_start_date", "TEXT"), ("academic_end_date", "TEXT"),
+                                     ("auth_refresh_hours", "INTEGER NOT NULL DEFAULT 24")]:
                 if name not in preference_columns:
                     self._connection.execute(f"ALTER TABLE user_preferences ADD COLUMN {name} {definition}")
             event_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(calendar_events)")}
@@ -371,6 +386,13 @@ class Database:
             )
 
     def upsert_event(self, user_id: int, event: dict[str, Any]) -> None:
+        if event["source"] == "byxt" and event["kind"] == "course":
+            previous = self.event_by_key(user_id, event["source"], event["external_id"])
+            metadata = dict(event.get("metadata") or {})
+            if previous and "_attendance" not in metadata and previous.get("starts_at") == event.get("starts_at") and previous.get("ends_at") == event.get("ends_at"):
+                if previous["metadata"].get("_attendance"):
+                    metadata["_attendance"] = previous["metadata"]["_attendance"]
+            event = {**event, "metadata": metadata}
         values = (
             user_id, event["source"], event["external_id"], event["kind"], event["title"],
             event.get("starts_at"), event.get("ends_at"), event.get("due_at"),
@@ -466,7 +488,7 @@ class Database:
 
     def upsert_source(self, user_id: int, source: dict[str, Any]) -> None:
         default_intervals = {
-            "iclass": 5, "grade": 15, "spoc": 30, "libbook": 30,
+            "iclass": 15, "grade": 15, "spoc": 30, "libbook": 30,
             "byxt": 60, "judge": 60, "bykc": 60, "cgyy": 60, "ygdk": 360,
         }
         refresh_interval = int(source.get(
@@ -475,12 +497,12 @@ class Database:
         with self._lock, self._connection:
             self._connection.execute(
                 """INSERT INTO user_sources(
-                       user_id,id,label,status,detail,last_sync_at,event_count,refresh_interval_minutes
-                   ) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id,id) DO UPDATE SET
+                       user_id,id,label,status,detail,last_sync_at,event_count,refresh_interval_minutes,enabled
+                   ) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,id) DO UPDATE SET
                     label=excluded.label,status=excluded.status,detail=excluded.detail,
                     last_sync_at=excluded.last_sync_at,event_count=excluded.event_count""",
                 (user_id, source["id"], source["label"], source["status"], source.get("detail", ""),
-                 source.get("last_sync_at"), source.get("event_count", 0), refresh_interval),
+                 source.get("last_sync_at"), source.get("event_count", 0), refresh_interval, int(source.get("enabled", source["id"] != "iclass"))),
             )
 
     def list_sources(self, user_id: int) -> list[dict[str, Any]]:
@@ -523,7 +545,7 @@ class Database:
         current = self.get_source(user_id, source_id)
         if not current:
             return None
-        if network_mode is not None and (source_id != "judge" or network_mode not in {"direct", "webvpn"}):
+        if network_mode is not None and network_mode not in {"direct", "webvpn"}:
             raise ValueError("此来源不支持该访问模式")
         if enabled is not None:
             self.set_source_enabled(user_id, source_id, enabled)
@@ -610,6 +632,7 @@ class Database:
         row = self._one("SELECT * FROM user_preferences WHERE user_id=?", (user_id,)) or {
             "user_id": user_id, "timezone": "Asia/Shanghai", "quiet_start": None, "quiet_end": None,
             "academic_filter_enabled": True, "academic_start_date": None, "academic_end_date": None,
+            "auth_refresh_hours": 24,
         }
         row["academic_filter_enabled"] = bool(row["academic_filter_enabled"])
         return row
@@ -619,11 +642,11 @@ class Database:
         with self._lock, self._connection:
             self._connection.execute(
                 """UPDATE user_preferences SET timezone=?,quiet_start=?,quiet_end=?,
-                   academic_filter_enabled=?,academic_start_date=?,academic_end_date=?,updated_at=?
+                   academic_filter_enabled=?,academic_start_date=?,academic_end_date=?,auth_refresh_hours=?,updated_at=?
                    WHERE user_id=?""",
                 (values["timezone"], values.get("quiet_start"), values.get("quiet_end"),
                  int(values["academic_filter_enabled"]), values.get("academic_start_date"),
-                 values.get("academic_end_date"), now_iso(), user_id),
+                 values.get("academic_end_date"), values["auth_refresh_hours"], now_iso(), user_id),
             )
         return self.preferences(user_id)
 
@@ -812,17 +835,31 @@ class Database:
                 # Restore only future ignored plans, never resend delivered work.
                 self._connection.execute(
                     "UPDATE scheduled_triggers SET status='queued',detail='',processed_at=NULL,attempts=0 "
-                    "WHERE user_id=? AND rule_id=? AND dedupe_key=? AND status='cancelled' AND detail='已忽略' "
+                    "WHERE user_id=? AND rule_id=? AND dedupe_key=? AND status='cancelled' "
+                    "AND detail IN ('已忽略','签到连接已停用','规则已停用') "
                     "AND run_at>=?", (user_id, rule_id, trigger["dedupe_key"], now_iso()))
                 cursor = self._connection.execute(
                     """INSERT OR IGNORE INTO scheduled_triggers
-                       (user_id,rule_id,event_id,action_index,occurrence,run_at,status,created_at,dedupe_key)
-                       VALUES(?,?,?,?,?,?,'queued',?,?)""",
+                       (user_id,rule_id,event_id,action_index,occurrence,run_at,status,created_at,dedupe_key,check_key)
+                       VALUES(?,?,?,?,?,?,'queued',?,?,?)""",
                     (user_id, rule_id, trigger["event_id"], trigger["action_index"], trigger["occurrence"],
-                     trigger["run_at"], now_iso(), trigger["dedupe_key"]),
+                     trigger["run_at"], now_iso(), trigger["dedupe_key"], trigger.get("check_key")),
                 )
                 inserted += cursor.rowcount
         return inserted
+
+    def attendance_check_result(self, user_id: int, check_key: str) -> dict | None:
+        return self._one("SELECT result,detail FROM attendance_check_results WHERE user_id=? AND check_key=?", (user_id, check_key))
+
+    def record_attendance_check(self, user_id: int, check_key: str, result: str, detail: str = "") -> None:
+        with self._lock, self._connection:
+            self._connection.execute("INSERT OR IGNORE INTO attendance_check_results VALUES(?,?,?,?,?)",
+                (user_id, check_key, result, detail[:160], now_iso()))
+
+    def cancel_course_checks(self, user_id: int, rule_id: int, event_id: int) -> None:
+        with self._lock, self._connection:
+            self._connection.execute("UPDATE scheduled_triggers SET status='cancelled',detail='已签到，后续检查取消',processed_at=? "
+                "WHERE user_id=? AND rule_id=? AND event_id=? AND status='queued'", (now_iso(), user_id, rule_id, event_id))
 
     def list_triggers(self, user_id: int, limit: int = 100) -> list[dict[str, Any]]:
         rows = self._rows(

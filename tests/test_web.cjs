@@ -4,7 +4,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
-test('JUDGE alone offers campus direct and school WebVPN with a dedicated login action', () => {
+test('account auth refresh settings default to 24 hours and save separately from sync intervals',()=>{
+  const html=fs.readFileSync(path.join(__dirname,'../web/index.html'),'utf8');
+  const js=fs.readFileSync(path.join(__dirname,'../web/app.js'),'utf8');
+  assert.match(html,/id="auth-refresh-form"/);
+  assert.match(html,/name="auth_refresh_hours"[^>]*value="24"/);
+  assert.match(html,/min="1" max="720"/);
+  assert.match(js,/JSON.stringify\(\{ auth_refresh_hours: hours \}\)/);
+  assert.match(js,/authForm.contains\(document.activeElement\)/);
+});
+
+test('school connections offer campus direct and school WebVPN with a dedicated login action', () => {
   const ui = app();
   const base = {id:'judge',label:'JUDGE 作业',available:true,enabled:true,status:'healthy',event_count:1};
   ui.context.fixtureSource = base;
@@ -23,9 +33,42 @@ test('JUDGE alone offers campus direct and school WebVPN with a dedicated login 
   ui.context.fixtureSource = {...base,network_mode:'webvpn',webvpn_login_required:true,status:'login_required'};
   assert.match(ui.run('renderSourceRow(fixtureSource)'), /data-source-webvpn-login/);
   ui.context.fixtureSource = {...base,id:'spoc'};
-  assert.doesNotMatch(ui.run('renderSourceRow(fixtureSource)'), /data-source-mode/);
+  assert.match(ui.run('renderSourceRow(fixtureSource)'), /data-source-mode="spoc"/);
+  ui.context.fixtureSource = {...base,id:'grade',available:false};
+  html = ui.run('renderSourceRow(fixtureSource)');
+  assert.match(html, /data-source-mode="grade"/); assert.match(html, /Coming Soon/);
+  assert.doesNotMatch(html, /data-source-sync/);
   ui.context.fixtureSource = {...base,network_mode:'webvpn',syncing:true};
   assert.match(ui.run('renderSourceRow(fixtureSource)'), /data-source-mode="judge"[^>]*disabled/);
+});
+
+test('attendance editor offers minute checkpoints, bounds and course exclusions', () => {
+  const ui=app();
+  ui.run('renderProfileSettings("signin")');
+  const html=ui.elements.get('#profile-settings').innerHTML;
+  assert.match(html,/add-check-time/); assert.match(html,/开始前/); assert.match(html,/结束前/);
+  assert.match(html,/max="10"/); assert.match(html,/排除课程/);
+  assert.doesNotMatch(html,/再次提醒|同步仅建立基线|completion-filter/);
+  assert.equal(ui.run('checkTimePoint("before_start",10).offset_minutes'),-10);
+  assert.equal(ui.run('checkTimePoint("before_end",5).anchor'),"ends_at");
+  assert.equal(ui.run('checkTimePoint("at_end",0).offset_minutes'),0);
+  assert.throws(()=>ui.run('checkTimePoint("before_start",11)'));
+  assert.throws(()=>ui.run('checkTimePoint("after_start",1.5)'));
+  ui.context.fixtureSource={id:'iclass',label:'课程签到',available:true,enabled:false};
+  assert.match(ui.run('renderSourceRow(fixtureSource)'),/data-source-interval="iclass"/);
+  assert.match(ui.run('renderSourceRow(fixtureSource)'),/5 分钟/);
+  assert.match(ui.run('renderSourceRow(fixtureSource)'),/15 分钟/);
+  assert.match(ui.run('renderSourceRow(fixtureSource)'),/手动/);
+  ui.context.fixtureSource.refresh_interval_minutes=25;
+  assert.match(ui.run('renderSourceRow(fixtureSource)'),/value="25" selected/);
+});
+
+test('attendance labels attach to courses without replacing completion or adding events',()=>{
+  const ui=app();
+  ui.context.course={kind:'course',status:'pending',attendance:{status:'done'}};
+  assert.match(ui.run('statusBadge(course)'),/已签到/);
+  assert.equal(ui.run('isCompleted(course)'),false);
+  assert.equal(ui.run('attendanceLabel({kind:"course",status:"pending"})'),"");
 });
 
 function app() {
@@ -110,7 +153,7 @@ test('course reminder supports start or end timing, while assignments keep submi
   const html = ui.elements.get('#profile-settings').innerHTML;
   assert.match(html, /before_start/); assert.match(html, /before_end/); assert.match(html, /advance_minutes/);
   assert.doesNotMatch(html, /completion_filter/);
-  assert.equal(ui.run('activeProfiles.has("signin")'), false);
+  assert.equal(ui.run('activeProfiles.has("signin")'), true);
   assert.equal(ui.run('activeProfiles.has("course")'), true);
 });
 

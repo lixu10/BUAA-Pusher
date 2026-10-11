@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import asyncio
+import logging
+import re
 import time as clock_time
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -10,6 +12,7 @@ from urllib.parse import unquote, urljoin, urlparse
 import httpx
 
 from app.upstream.sso import AuthenticationRequired, BuaaSsoSession
+from app.upstream.webvpn import WebVpnClient, from_webvpn_url
 
 from .base import ConnectorManifest, SourceAdapter
 
@@ -17,6 +20,7 @@ from .base import ConnectorManifest, SourceAdapter
 MY_CENTER_URL = "https://iclass.buaa.edu.cn:8346/?type=jumpMyCenter"
 LOGIN_URL = "https://iclass.buaa.edu.cn:8347/app/user/login.action"
 CLASSES_URL = "https://iclass.buaa.edu.cn:8347/app/course/get_stu_course_sched.action"
+logger = logging.getLogger(__name__)
 
 
 class IClassAdapter(SourceAdapter):
@@ -25,7 +29,7 @@ class IClassAdapter(SourceAdapter):
     manifest = ConnectorManifest(
         id=id,
         label=label,
-        version="2026-09-19",
+        version="2026-10-09",
         capabilities=("signin_status",),
         endpoints=(MY_CENTER_URL, LOGIN_URL, CLASSES_URL),
         references=(
@@ -51,26 +55,38 @@ class IClassAdapter(SourceAdapter):
                 await asyncio.sleep(0.2)
         return []
 
-    async def _sync_session(self) -> list[dict[str, Any]]:
+    async def query_day(self, day: date) -> list[dict[str, Any]]:
+        for attempt in range(2):
+            try:
+                return await self._sync_session([day])
+            except AuthenticationRequired:
+                self.session.iclass_identity = None
+                if attempt:
+                    raise
+
+    async def _sync_session(self, days: list[date] | None = None) -> list[dict[str, Any]]:
         cached = getattr(self.session, "iclass_identity", None)
         if cached and clock_time.monotonic() - cached[3] < 1800:
             login_name, user_id, session_id, _ = cached
         else:
             login_name = await self._resolve_login_name()
             user_id = session_id = ""
-        # Match iClass itself: its app session is isolated from the SSO cookie
-        # jar and its certificate chain is not consistently trusted on Windows.
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=30, trust_env=False, verify=False,
-            headers={"User-Agent": "Mozilla/5.0 PUAA-Reminder/0.1"},
-        ) as client:
+        # Keep the app session isolated from SSO. No write endpoint or business
+        # redirect is followed; direct and gateway TLS both remain verified.
+        client = WebVpnClient() if self.session.network_mode == "webvpn" else httpx.AsyncClient(
+            follow_redirects=False, timeout=30, trust_env=False,
+            headers={"User-Agent": "Mozilla/5.0 PUAA-Reminder/0.1"})
+        if self.session.network_mode == "webvpn":
+            client.cookies.update(self.session.client.cookies)
+        try:
             if not session_id:
                 user_id, session_id = await self._app_login(client, login_name)
             self.session.iclass_identity = (login_name, user_id, session_id, clock_time.monotonic())
             events: list[dict[str, Any]] = []
-            for offset in range(2):
-                day = datetime.now(timezone(timedelta(hours=8))).date() + timedelta(days=offset)
-                self.report_progress(offset, 2, "查询签到详情")
+            today = datetime.now(timezone(timedelta(hours=8))).date()
+            days = days or [today, today + timedelta(days=1)]
+            for offset, day in enumerate(days):
+                self.report_progress(offset, len(days), "查询签到详情")
                 class_payload = await self._classes(client, user_id, session_id, day)
                 if "STATUS" in class_payload and not self._success(class_payload):
                     # UBAA retries once because iClass sometimes invalidates a
@@ -79,19 +95,15 @@ class IClassAdapter(SourceAdapter):
                     self.session.iclass_identity = (login_name, user_id, session_id, clock_time.monotonic())
                     class_payload = await self._classes(client, user_id, session_id, day)
                     if "STATUS" in class_payload and not self._success(class_payload):
-                        message = str(class_payload.get("ERRMSG") or "").strip()
-                        if any(word in message for word in ("登录", "会话", "认证", "失效")):
-                            raise AuthenticationRequired(message)
-                        # Current iClass returns STATUS=2 with an empty result
-                        # after a successful app login when no schedule can be
-                        # read for that day.  UBAA treats this as an empty day.
-                        continue
+                        self._query_error(day, class_payload)
                 rows = class_payload.get("result") or []
                 if not isinstance(rows, list):
                     raise RuntimeError("iClass 课程字段结构已变化")
                 events.extend(self._event(day, item) for item in rows if isinstance(item, dict))
-            self.report_progress(2, 2, "查询签到详情")
+            self.report_progress(len(days), len(days), "查询签到详情")
             return events
+        finally:
+            await client.aclose()
 
     async def _app_login(self, client: httpx.AsyncClient, login_name: str) -> tuple[str, str]:
         response = await client.get(LOGIN_URL, params={
@@ -124,18 +136,21 @@ class IClassAdapter(SourceAdapter):
             if found:
                 return found
             response = await self.session.client.get(current, follow_redirects=False)
-            found = self._login_name(str(response.url))
+            response_url = from_webvpn_url(str(response.url))
+            found = self._login_name(response_url)
             if found:
                 return found
             location = response.headers.get("location")
             if location:
-                target = urljoin(str(response.url), location)
+                if location.startswith("https://d.buaa.edu.cn/") or re.match(r"^/(?:https?|https?-\d+)/", location):
+                    location = from_webvpn_url(urljoin(str(response.url), location))
+                target = urljoin(response_url, location)
                 found = self._login_name(target)
                 if found:
                     return found
                 current = target
                 continue
-            if "sso.buaa.edu.cn" in str(response.url) or response.status_code == 401:
+            if "sso.buaa.edu.cn" in response_url or response.status_code == 401:
                 raise AuthenticationRequired("iClass 授权未完成")
             break
         raise AuthenticationRequired("iClass 授权跳转未返回登录凭据，请单独重试或重新连接北航")
@@ -155,8 +170,25 @@ class IClassAdapter(SourceAdapter):
         return str(payload.get("STATUS", "")).lower() in {"0", "200", "success"}
 
     @staticmethod
+    def _query_error(day: date, payload: dict[str, Any]):
+        raw_status = str(payload.get("STATUS", "")).lower()
+        status = raw_status if re.fullmatch(r"-?\d{1,6}|success|error|failed", raw_status) else "unknown"
+        rows = payload.get("result")
+        count = len(rows) if isinstance(rows, list) else -1
+        message = str(payload.get("ERRMSG") or "").strip()
+        auth_error = any(word in message for word in ("登录", "会话", "认证", "失效"))
+        # Deliberately exclude account identifiers, loginName, sessionId, URLs,
+        # upstream messages and payload bodies from persistent diagnostics.
+        logger.warning("iClass query rejected date=%s status=%s result_count=%s has_error=%s auth_error=%s",
+                       day.isoformat(), status, count, bool(message), auth_error)
+        detail = f"iClass {day.isoformat()} 查询失败（STATUS={status}，列表{'结构异常' if count < 0 else count}，错误字段{'有' if message else '无'}），旧数据已保留"
+        if auth_error:
+            raise AuthenticationRequired(detail)
+        raise RuntimeError(detail)
+
+    @staticmethod
     def _payload(response: Any, label: str) -> dict[str, Any]:
-        if response.status_code == 401 or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code == 401 or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired(f"{label}授权未完成")
         if response.status_code != 200:
             raise RuntimeError(f"{label}返回 {response.status_code}")
@@ -178,7 +210,7 @@ class IClassAdapter(SourceAdapter):
         identity = course_id or hashlib.sha1(f"{day}|{name}|{begins}".encode()).hexdigest()[:16]
         return {
             "source": self.id,
-            "external_id": f"signin-{day.isoformat()}-{identity}",
+            "external_id": f"signin-{day.isoformat()}-{identity}-{hashlib.sha1(f'{begins}|{ends}'.encode()).hexdigest()[:8]}",
             "kind": "signin",
             "title": f"{name}签到",
             "starts_at": begins,

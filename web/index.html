@@ -8,7 +8,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://cdn.jsdelivr.net">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-  <link rel="stylesheet" href="/styles.css?v=20261008-4">
+  <link rel="stylesheet" href="/styles.css?v=20261012-1">
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
@@ -118,6 +118,7 @@
         <div class="page-heading"><h2>账户与安全</h2></div>
         <div class="account-panel"><div><strong id="account-name"></strong><span id="account-email"></span></div><button class="danger-button" id="logout-button">退出登录</button></div>
         <form class="preferences-panel" id="preferences-form"><div><strong>安静时段</strong><span>规则可选择延后、跳过或忽略</span></div><label>开始<input type="time" name="quiet_start"></label><label>结束<input type="time" name="quiet_end"></label><button class="quiet-button" type="submit">保存</button></form>
+        <form class="preferences-panel" id="auth-refresh-form"><div><strong>学校认证刷新</strong><span>需记住学校密码</span></div><label>间隔（小时）<input type="number" name="auth_refresh_hours" min="1" max="720" step="1" value="24" required></label><button class="quiet-button" type="submit">保存</button></form>
         <h3 class="settings-heading">学期范围</h3>
         <form id="academic-form" class="academic-tools">
           <label class="check-row"><input type="checkbox" name="academic_filter_enabled" checked><span>学期过滤</span></label>
@@ -145,6 +146,7 @@
   <dialog id="school-dialog">
     <form id="school-form">
       <input type="hidden" name="network_mode" value="direct">
+      <input type="hidden" name="source_id" value="">
       <div class="dialog-head"><div><h2 id="school-dialog-title">连接北航</h2></div><button class="icon-button" type="button" data-close="school-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div>
       <label>学号<input name="username" required maxlength="80" autocomplete="username"></label>
       <label>密码<input name="password" type="password" required maxlength="200" autocomplete="current-password"></label>
@@ -162,7 +164,7 @@
       <div class="dialog-head"><h2 id="rule-dialog-title">新建提醒</h2><button class="icon-button" type="button" data-close="rule-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div>
       <div class="rule-editor-body">
       <div class="rule-identity">
-        <label class="rule-field"><span>连接</span><select name="connection" id="rule-connection"><option value="byxt">课程提醒</option><option value="spoc" selected>SPOC 作业</option><option value="judge">JUDGE 作业</option><option value="assignments" hidden>SPOC + JUDGE（旧规则）</option><option disabled>课程签到 · Coming Soon</option><option disabled>图书馆 · Coming Soon</option><option disabled>其他连接 · Coming Soon</option></select></label>
+        <label class="rule-field"><span>连接</span><select name="connection" id="rule-connection"><option value="byxt">课程提醒</option><option value="iclass">课程签到</option><option value="spoc" selected>SPOC 作业</option><option value="judge">JUDGE 作业</option><option value="assignments" hidden>SPOC + JUDGE（旧规则）</option><option disabled>图书馆 · Coming Soon</option><option disabled>其他连接 · Coming Soon</option></select></label>
         <label class="rule-field"><span>规则类型</span><select name="profile" id="rule-profile"></select></label>
         <label class="rule-field"><span>名称</span><input name="name" required maxlength="80" autocomplete="off"></label>
       </div>
@@ -189,6 +191,6 @@
     <div class="calendar-detail-sheet"><div class="dialog-head"><h2 id="calendar-detail-title"></h2><button type="button" class="icon-button" data-close="calendar-detail-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div><dl id="calendar-detail-body"></dl></div>
   </dialog>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=20261008-4" defer></script>
+  <script src="/app.js?v=20261012-1" defer></script>
 </body>
 </html>

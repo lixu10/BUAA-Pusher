@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.upstream.sso import AuthenticationRequired, BuaaSsoSession
+from app.upstream.webvpn import from_webvpn_url
 
 from .base import ConnectorManifest, SourceAdapter
 
@@ -50,7 +51,7 @@ class CgyyAdapter(SourceAdapter):
 
     async def _login(self) -> None:
         response = await self.session.client.get(MANAGE_LOGIN_URL)
-        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired("体育场馆授权未完成")
         sso_token = self._cookie(SSO_COOKIE_NAME)
         if not sso_token:
@@ -96,7 +97,7 @@ class CgyyAdapter(SourceAdapter):
             data=values if method != "GET" else None,
             headers=headers,
         )
-        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired("体育场馆会话已失效")
         if response.status_code != 200:
             raise RuntimeError(f"体育场馆接口返回 {response.status_code}")

@@ -22,6 +22,19 @@ def definition(kind="assignment", source="spoc"):
 
 
 class FeatureApiTest(unittest.TestCase):
+    def test_auth_refresh_preference_defaults_validation_and_user_isolation(self):
+        self.assertEqual(24,self.client.get("/api/dashboard").json()["preferences"]["auth_refresh_hours"])
+        other=self.db.create_user("other-auth@example.com","Other","hash")["id"]
+        for hours in (1,12,24,720):
+            response=self.client.put("/api/preferences",json={"auth_refresh_hours":hours})
+            self.assertEqual(200,response.status_code)
+            self.assertEqual(hours,response.json()["auth_refresh_hours"])
+        for hours in (0,721,1.5,True,"24"):
+            self.assertEqual(422,self.client.put("/api/preferences",json={"auth_refresh_hours":hours}).status_code)
+        self.assertEqual(24,self.db.preferences(other)["auth_refresh_hours"])
+        self.client.put("/api/preferences",json={"quiet_start":"23:00"})
+        self.assertEqual(720,self.db.preferences(self.uid)["auth_refresh_hours"])
+
     def setUp(self):
         self.db = Database(":memory:")
         self.db.init()
@@ -54,20 +67,21 @@ class FeatureApiTest(unittest.TestCase):
         self.assertEqual(5, len(self.db.list_events(self.uid)))
         active = [s for s in data["sources"] if s["available"]]
         parked = [s for s in data["sources"] if not s["available"]]
-        self.assertEqual(3, len(active))
-        self.assertEqual(6, len(parked))
+        self.assertEqual(4, len(active))
+        self.assertEqual(5, len(parked))
         self.assertTrue(all(not s["enabled"] and s["detail"] == "Coming Soon" for s in parked))
         self.assertEqual(3, len(self.client.get("/api/events").json()))
 
     def test_disabled_features_cannot_be_enabled_via_api(self):
-        for source in ["iclass", "grade", "bykc", "libbook", "ygdk", "cgyy", "custom"]:
+        for source in ["grade", "bykc", "libbook", "ygdk", "cgyy", "custom"]:
             response = self.client.patch(f"/api/sources/{source}", json={"enabled": True})
-            self.assertEqual(403, response.status_code)
-            self.assertEqual("Coming Soon", response.json()["detail"])
+            self.assertEqual(404 if source == "custom" else 403, response.status_code)
+            if source != "custom":
+                self.assertEqual("Coming Soon", response.json()["detail"])
         self.assertEqual(403, self.client.post("/api/events", json={"title": "个人日程"}).status_code)
         self.assertEqual(403, self.client.post("/api/rules", json=definition("grade", "grade")).status_code)
         self.assertEqual(201, self.client.post("/api/rules", json=definition()).status_code)
-        self.assertEqual(403, self.client.post("/api/sources/iclass/sync").status_code)
+        self.assertEqual(200, self.client.patch("/api/sources/iclass", json={"enabled": True}).status_code)
         self.assertEqual(201, self.client.post("/api/rules", json=definition("course", "byxt")).status_code)
         parked = self.db.create_automation_rule(self.uid, definition("signin", "iclass"))
         self.assertEqual(403, self.client.patch(f"/api/rules/{parked['id']}", json={"enabled": True}).status_code)
@@ -76,6 +90,16 @@ class FeatureApiTest(unittest.TestCase):
         exposed = next(r for r in self.client.get("/api/rules").json() if r["id"] == parked["id"])
         self.assertFalse(exposed["enabled"])
         self.assertFalse(exposed["available"])
+        self.assertEqual("needs_configuration", exposed["availability"])
+        from tests.test_attendance import rule_payload
+        upgraded = self.client.put(f"/api/rules/{parked['id']}", json=rule_payload())
+        self.assertEqual(200, upgraded.status_code)
+        self.assertTrue(rule_available(upgraded.json()))
+        for interval in (5, 15, 30, 60, 360, 1440, 0):
+            response = self.client.patch("/api/sources/iclass", json={"refresh_interval_minutes":interval})
+            self.assertEqual(200, response.status_code)
+            self.assertEqual(interval, self.db.get_source(self.uid,"iclass")["refresh_interval_minutes"])
+        self.assertEqual(422, self.client.patch("/api/sources/iclass",json={"refresh_interval_minutes":1441}).status_code)
 
 
 class FeatureExecutionTest(unittest.IsolatedAsyncioTestCase):

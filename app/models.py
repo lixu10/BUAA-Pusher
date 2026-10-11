@@ -42,6 +42,7 @@ class SchoolLoginRequest(BaseModel):
     captcha: str | None = Field(default=None, max_length=20)
     remember_password: bool = False
     network_mode: Literal["direct", "webvpn"] = "direct"
+    source_id: str | None = Field(default=None, max_length=20)
 
 
 class EventCreate(BaseModel):
@@ -117,6 +118,32 @@ class AutomationRuleCreate(BaseModel):
 
     @model_validator(mode="after")
     def requires_trigger(self):
+        if self.profile == "signin":
+            points = self.profile_settings.get("check_times")
+            if not isinstance(points, list) or not 1 <= len(points) <= 10:
+                raise ValueError("签到检查需设置 1–10 个时间点")
+            parsed = []
+            for point in points:
+                if not isinstance(point, dict) or point.get("anchor") not in {"starts_at", "ends_at"}:
+                    raise ValueError("签到检查以课程开始或结束为基准")
+                offset = point.get("offset_minutes")
+                if type(offset) is not int or not -1440 <= offset <= 1440:
+                    raise ValueError("检查分钟数必须为整数")
+                if point["anchor"] == "starts_at" and offset < -10 or point["anchor"] == "ends_at" and offset > 0:
+                    raise ValueError("只能在开始前 10 分钟至课程结束之间检查")
+                parsed.append(RuleTrigger(**point))
+            if len({(p.anchor, p.offset_minutes) for p in parsed}) != len(parsed):
+                raise ValueError("检查时间点不能重复")
+            excluded = self.profile_settings.get("excluded_courses", [])
+            if not isinstance(excluded, list) or len(excluded) > 200 or any(not isinstance(v, str) or len(v) > 120 for v in excluded):
+                raise ValueError("排除课程格式不正确")
+            if any(action.after_minutes for action in self.actions):
+                raise ValueError("签到通知不使用延后动作，请添加检查时间点")
+            self.scope = RuleScope(kinds=["signin"], sources=["iclass"])
+            self.triggers, self.trigger, self.repeat = parsed, parsed[0], RuleRepeat()
+            self.conditions, self.cancel_conditions = [], []
+            self.profile_settings["completion_filter"] = "incomplete"
+            return self
         if self.profile == "course" and "advance_minutes" in self.profile_settings:
             timing = self.profile_settings.get("timing", "before_start")
             minutes = self.profile_settings["advance_minutes"]
@@ -202,6 +229,7 @@ class NotificationChannelUpdate(BaseModel):
 
 
 class PreferencesUpdate(BaseModel):
+    auth_refresh_hours: int = Field(default=24, ge=1, le=720, strict=True)
     timezone: str = Field(default="Asia/Shanghai", max_length=80)
     quiet_start: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     quiet_end: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")

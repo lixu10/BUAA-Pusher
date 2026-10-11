@@ -4,6 +4,7 @@ import hmac
 import json
 import sqlite3
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -18,7 +19,7 @@ from app.adapters import (
 )
 from app.config import ROOT, settings
 from app.db import Database, now_iso
-from app.features import ACTIVE_SOURCES, event_available, public_rule, rule_available
+from app.features import ACTIVE_SOURCES, SCHOOL_SOURCES, event_available, public_rule, rule_available
 from app.models import (
     AutomationRuleCreate, AutomationRuleUpdate, EventCreate, EventIgnoreUpdate, NotificationChannelCreate,
     NotificationChannelUpdate, PreferencesUpdate, RegisterRequest, SchoolLoginRequest, SourceUpdate,
@@ -27,10 +28,12 @@ from app.models import (
 from app.security import CredentialVault, hash_password, new_token, token_digest, verify_password
 from app.services.aggregator import Aggregator
 from app.services.academic import academic_window, in_academic_window
+from app.services.attendance import AttendanceService, merge_calendar
 from app.services.event_state import public_event
 from app.services.notifications import NotificationSender, TriggerDispatcher, validate_channel_config
 from app.services.rules import RULE_TEMPLATES, RuleEngine
 from app.services.school_sessions import SchoolSessionManager
+from app.services.school_recovery import SchoolAuthRecovery
 from app.services.source_health import source_transition_message
 from app.services.worker import BackgroundWorker
 from app.upstream.sso import LoginFailed, AuthenticationRequired
@@ -41,6 +44,7 @@ CSRF_COOKIE = "puaa_csrf"
 db = Database(settings.database_path)
 vault = CredentialVault(settings.database_path.parent, settings.master_key)
 school_sessions = SchoolSessionManager(settings.trust_env_proxy)
+school_recovery = SchoolAuthRecovery()
 rule_engine = RuleEngine(db, enforce_feature_scope=True)
 notification_sender = NotificationSender(db, vault)
 dispatcher = TriggerDispatcher(db, notification_sender, enforce_feature_scope=True)
@@ -48,6 +52,57 @@ worker: BackgroundWorker | None = None
 sync_locks: dict[int, asyncio.Lock] = {}
 sync_jobs: dict[tuple[int, str], asyncio.Task] = {}
 sync_progress: dict[tuple[int, str], dict[str, Any]] = {}
+auth_jobs: dict[tuple[int, str], asyncio.Task] = {}
+logger = logging.getLogger(__name__)
+
+
+async def source_session(user_id: int, source_id: str):
+    vpn_mode = (db.get_source(user_id, source_id) or {}).get("network_mode") == "webvpn"
+    return await school_sessions.get_webvpn(user_id) if vpn_mode else await school_sessions.get(user_id)
+
+
+def remembered_school_credentials(user_id):
+    secret = db.school_secret(user_id)
+    if secret and secret.get("remember_password") and secret.get("password_ciphertext"):
+        return secret["school_id"], vault.decrypt(user_id, secret["password_ciphertext"])
+    return None
+
+
+def mark_school_login_required(user_id, school, detail):
+    # A WebVPN failure must not invalidate the independent primary connection.
+    if school is not None and school.network_mode == "direct" and db.school_connection(user_id):
+        db.upsert_school_connection(user_id, {"status":"login_required", "detail":detail})
+
+
+async def query_attendance_day(user_id, day):
+    school = None
+    try:
+        school = await source_session(user_id, "iclass")
+        records = await school_recovery.run(user_id, school,
+            lambda: IClassAdapter(school).query_day(day), lambda: remembered_school_credentials(user_id))
+        db.upsert_source(user_id, {**(db.get_source(user_id, "iclass") or {}),
+            "id":"iclass", "label":"课程签到", "status":"healthy", "detail":""})
+        return records
+    except AuthenticationRequired as exc:
+        mark_school_login_required(user_id, school, str(exc))
+        db.upsert_source(user_id, {**(db.get_source(user_id, "iclass") or {}), "id":"iclass", "label":"课程签到", "status":"login_required",
+                                   "detail":str(exc)[:160]})
+        raise
+    except Exception:
+        db.upsert_source(user_id, {**(db.get_source(user_id, "iclass") or {}), "id":"iclass", "label":"课程签到", "status":"error",
+                                   "detail":"签到状态查询失败，旧数据已保留"})
+        raise
+
+
+attendance_service = AttendanceService(db, query_attendance_day)
+
+
+async def prepare_attendance(user_id, context, event, definition):
+    attendance_service.db = db
+    return await attendance_service.prepare(user_id, context, event, definition)
+
+
+dispatcher.attendance_checker = prepare_attendance
 
 
 @asynccontextmanager
@@ -68,12 +123,13 @@ async def lifespan(_: FastAPI):
     yield
     if worker:
         await worker.stop()
-    pending = [task for task in sync_jobs.values() if not task.done()]
+    pending = [task for task in [*sync_jobs.values(), *auth_jobs.values()] if not task.done()]
     for task in pending:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
     sync_jobs.clear()
     sync_progress.clear()
+    auth_jobs.clear()
     await school_sessions.close()
 
 
@@ -145,7 +201,7 @@ async def sync_for(user_id: int, source_ids: set[str] | None = None) -> dict[str
 def start_sync(user_id: int, source_ids: set[str]) -> dict[str, asyncio.Task]:
     tasks = {}
     for source_id in sorted(source_ids & ACTIVE_SOURCES):
-        if not (db.get_source(user_id, source_id) or {}).get("enabled", True):
+        if not (db.get_source(user_id, source_id) or {}).get("enabled", source_id != "iclass"):
             continue
         key = (user_id, source_id)
         task = sync_jobs.get(key)
@@ -161,36 +217,37 @@ async def sync_one(user_id: int, source_id: str) -> int:
     # Enforce the boundary even for internal/direct calls, before SSO access.
     if source_id not in ACTIVE_SOURCES:
         return 0
+    if source_id == "iclass" and not (db.get_source(user_id, source_id) or {}).get("enabled", False):
+        return 0
     key = (user_id, source_id)
     previous = db.get_source(user_id, source_id)
-    lock = sync_locks.setdefault(user_id, asyncio.Lock())
+    school = None
     try:
-        vpn_mode = source_id == "judge" and (previous or {}).get("network_mode") == "webvpn"
-        school = await school_sessions.get_webvpn(user_id) if vpn_mode else await school_sessions.get(user_id)
-        # Only the common SSO login needs serialization; slow business systems
-        # must not block the other sources or notification dispatch.
-        async with lock:
-            if not school.authenticated:
-                secret = db.school_secret(user_id)
-                if secret and secret.get("remember_password") and secret.get("password_ciphertext"):
-                    await school.login(secret["school_id"], vault.decrypt(user_id, secret["password_ciphertext"]))
-                if not school.authenticated:
-                    if vpn_mode:
-                        raise AuthenticationRequired("学校 WebVPN 需要登录，请在 JUDGE 连接中选择登录")
-                    db.upsert_school_connection(user_id, {"status": "login_required", "detail": "统一认证会话已失效"})
+        school = await source_session(user_id, source_id)
         if source_id == "judge":
             adapter = JudgeAdapter(school, previous_events=db.list_events(user_id, limit=5000),
                                    academic_window=academic_window(db.preferences(user_id)))
         else:
-            adapter = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter}[source_id](school)
+            adapter = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "iclass": IClassAdapter}[source_id](school)
         adapter.on_progress = lambda values: sync_progress.__setitem__(key, values)
         sync_progress[key]["phase"] = "读取数据"
-        aggregator = Aggregator(db, user_id, [adapter])
-        result = await aggregator.sync()
+        async def read_events(current_adapter):
+            def recovering():
+                sync_progress[key]["phase"] = "重新认证中"
+            return await school_recovery.run(user_id, school, current_adapter.sync,
+                lambda: remembered_school_credentials(user_id), recovering)
+        aggregator = Aggregator(db, user_id, [adapter], read_events=read_events)
+        if source_id == "iclass":
+            async with attendance_service.locks.setdefault(user_id, asyncio.Lock()):
+                result = await aggregator.sync()
+        else:
+            result = await aggregator.sync()
+        if source_id == "iclass" and (db.get_source(user_id, source_id) or {}).get("status") == "healthy":
+            AttendanceService(db, None).record(user_id, [e for e in db.list_events(user_id) if e["source"] == "iclass"])
         current_sources = db.list_sources(user_id)
         current = db.get_source(user_id, source_id)
-        if vpn_mode and current and current["status"] == "login_required":
-            school.user = None  # Next refresh can reauthorize with explicitly saved credentials.
+        if current and current["status"] == "login_required":
+            mark_school_login_required(user_id, school, current["detail"])
         message = source_transition_message(previous, current) if current else None
         if message:
             await notification_sender.send(user_id, "in_app", None, message[0], message[1])
@@ -207,12 +264,13 @@ async def sync_one(user_id: int, source_id: str) -> int:
     except asyncio.CancelledError:
         raise
     except AuthenticationRequired as exc:
-        label = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "judge": JudgeAdapter}[source_id].label
+        mark_school_login_required(user_id, school, str(exc))
+        label = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "judge": JudgeAdapter, "iclass": IClassAdapter}[source_id].label
         db.upsert_source(user_id, {"id": source_id, "label": label, "status": "login_required",
             "detail": str(exc), "last_sync_at": now_iso(), "event_count": (previous or {}).get("event_count", 0)})
         return 0
     except Exception as exc:
-        label = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "judge": JudgeAdapter}[source_id].label
+        label = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "judge": JudgeAdapter, "iclass": IClassAdapter}[source_id].label
         db.upsert_source(user_id, {"id": source_id, "label": label, "status": "error",
             "detail": Aggregator._error_detail(exc), "last_sync_at": now_iso(),
             "event_count": (previous or {}).get("event_count", 0)})
@@ -223,9 +281,30 @@ async def sync_one(user_id: int, source_id: str) -> int:
 
 async def sync_all_remembered() -> None:
     for user_id in db.list_auto_sync_user_ids():
+        sources = [s for s in db.list_sources(user_id) if s["id"] in ACTIVE_SOURCES and s.get("enabled")]
+        for mode in {s.get("network_mode", "direct") for s in sources}:
+            key = (user_id, mode)
+            if key not in auth_jobs or auth_jobs[key].done():
+                auth_jobs[key] = asyncio.create_task(refresh_school_auth(user_id, mode))
         due = set(db.due_source_ids(user_id)) & ACTIVE_SOURCES
         if due:
             start_sync(user_id, due)
+
+
+async def refresh_school_auth(user_id, mode):
+    school = None
+    try:
+        school = await school_sessions.get_webvpn(user_id) if mode == "webvpn" else await school_sessions.get(user_id)
+        await school_recovery.refresh_due(user_id, school, lambda: remembered_school_credentials(user_id),
+                                          db.preferences(user_id)["auth_refresh_hours"])
+    except AuthenticationRequired as exc:
+        mark_school_login_required(user_id, school, str(exc))
+        for source in db.list_sources(user_id):
+            if source["id"] in ACTIVE_SOURCES and source.get("enabled") and source.get("network_mode", "direct") == mode:
+                db.upsert_source(user_id, {**source, "status":"login_required", "detail":str(exc)[:160]})
+    except Exception as exc:
+        # No URLs, identifiers, credentials or raw upstream error text in logs.
+        logger.warning("School authentication refresh failed route=%s error=%s", mode, type(exc).__name__)
 
 
 @app.get("/api/health")
@@ -288,7 +367,8 @@ async def logout(request: Request, response: Response, user: dict[str, Any] = De
 async def school_preload(network_mode: Literal["direct", "webvpn"] = "direct", user: dict[str, Any] = Depends(csrf_user)):
     try:
         upstream = await school_sessions.get_webvpn(user["id"]) if network_mode == "webvpn" else await school_sessions.get(user["id"])
-        return await upstream.preload()
+        async with school_recovery.lock(user["id"], network_mode):
+            return await upstream.preload()
     except Exception as exc:
         raise HTTPException(status_code=503, detail="学校 WebVPN 暂不可达" if network_mode == "webvpn" else "北航统一认证暂不可达") from exc
 
@@ -297,7 +377,8 @@ async def school_preload(network_mode: Literal["direct", "webvpn"] = "direct", u
 async def school_captcha(captcha_id: str, network_mode: Literal["direct", "webvpn"] = "direct", user: dict[str, Any] = Depends(current_user)):
     try:
         upstream = await school_sessions.get_webvpn(user["id"]) if network_mode == "webvpn" else await school_sessions.get(user["id"])
-        content, media_type = await upstream.captcha(captcha_id)
+        async with school_recovery.lock(user["id"], network_mode):
+            content, media_type = await upstream.captcha(captcha_id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="验证码获取失败") from exc
     return RawResponse(content=content, media_type=media_type)
@@ -310,11 +391,13 @@ async def school_login(payload: SchoolLoginRequest, user: dict[str, Any] = Depen
     if vpn_mode:
         if not existing or payload.username != existing["school_id"]:
             raise HTTPException(status_code=422, detail="WebVPN 请使用已连接的学校账号")
-        if (db.get_source(user["id"], "judge") or {}).get("network_mode") != "webvpn":
-            raise HTTPException(status_code=409, detail="请先选择 JUDGE 的 WebVPN 模式")
+        selected = payload.source_id or "judge"
+        if selected not in SCHOOL_SOURCES or (db.get_source(user["id"], selected) or {}).get("network_mode") != "webvpn":
+            raise HTTPException(status_code=409, detail="请先选择该连接的 WebVPN 模式")
     upstream = await school_sessions.get_webvpn(user["id"]) if vpn_mode else await school_sessions.get(user["id"])
     try:
-        status = await upstream.login(payload.username, payload.password, payload.captcha)
+        async with school_recovery.lock(user["id"], payload.network_mode):
+            status = await upstream.login(payload.username, payload.password, payload.captcha)
     except LoginFailed as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except Exception as exc:
@@ -326,7 +409,7 @@ async def school_login(payload: SchoolLoginRequest, user: dict[str, Any] = Depen
         if payload.remember_password:
             db.upsert_school_connection(user["id"], {
                 "remember_password": True, "password_ciphertext": vault.encrypt(user["id"], payload.password)})
-        start_sync(user["id"], {"judge"})
+        start_sync(user["id"], {selected})
         return {"authenticated": True, "network_mode": "webvpn", "school": db.school_connection(user["id"])}
     encrypted = vault.encrypt(user["id"], payload.password) if payload.remember_password else None
     db.upsert_school_connection(user["id"], {
@@ -340,12 +423,13 @@ async def school_login(payload: SchoolLoginRequest, user: dict[str, Any] = Depen
     })
     if existing and existing["school_id"] != payload.username:
         await school_sessions.reset_webvpn(user["id"])
-    if (db.get_source(user["id"], "judge") or {}).get("network_mode") == "webvpn":
+    if any(s["id"] in ACTIVE_SOURCES and s["enabled"] and s.get("network_mode") == "webvpn" for s in db.list_sources(user["id"])):
         # Reuse only this explicit login's password, never retain it in memory.
         # A separate CAPTCHA must be solved by the user; do not reuse the SSO code.
         try:
             vpn = await school_sessions.get_webvpn(user["id"])
-            await vpn.login(payload.username, payload.password)
+            async with school_recovery.lock(user["id"], "webvpn"):
+                await vpn.login(payload.username, payload.password)
         except Exception:
             pass  # Primary SSO login remains valid; the JUDGE source reports its own error.
     start_sync(user["id"], set(ACTIVE_SOURCES))
@@ -354,10 +438,13 @@ async def school_login(payload: SchoolLoginRequest, user: dict[str, Any] = Depen
 
 @app.post("/api/school/disconnect", status_code=204)
 async def school_disconnect(user: dict[str, Any] = Depends(csrf_user)):
-    tasks = [task for (uid, _), task in sync_jobs.items() if uid == user["id"] and not task.done()]
+    tasks = [task for (uid, _), task in [*sync_jobs.items(), *auth_jobs.items()]
+             if uid == user["id"] and not task.done()]
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    for key in [key for key in auth_jobs if key[0] == user["id"]]:
+        auth_jobs.pop(key, None)
     await school_sessions.remove(user["id"])
     db.disconnect_school(user["id"])
     return None
@@ -369,21 +456,23 @@ def dashboard(user: dict[str, Any] = Depends(current_user)):
     data["academic_window"] = academic_window(data["preferences"])
     data["events"] = [public_event(event) for event in data["events"]
                       if event_available(event) and in_academic_window(event, data["academic_window"])]
+    data["events"] = merge_calendar(data["events"], (db.get_source(user["id"], "iclass") or {}).get("enabled", False))
+    data["attendance_details"] = AttendanceService(db, None).details(user["id"])
     data["rules"] = [public_rule(rule) for rule in data["rules"]]
     existing = {source["id"]: source for source in data["sources"]}
     data["sources"] = []
     for manifest in connectors(user):
         source = existing.get(manifest["id"], {
-            "id": manifest["id"], "label": manifest["label"], "enabled": True,
+            "id": manifest["id"], "label": manifest["label"], "enabled": manifest["id"] != "iclass",
             "status": "not_connected", "detail": "未连接", "last_sync_at": None,
-            "event_count": 0, "refresh_interval_minutes": 60,
+            "event_count": 0, "refresh_interval_minutes": 15 if manifest["id"] == "iclass" else 60,
             "network_mode": "direct",
         })
         available = manifest["available"]
         data["sources"].append({**source, "available": available,
-            "webvpn_login_required": bool(manifest["id"] == "judge" and source.get("network_mode") == "webvpn"
-                and not school_sessions.webvpn_authenticated(user["id"])) or bool(manifest["id"] == "judge"
-                and source.get("network_mode") == "webvpn" and source.get("status") == "login_required"),
+            "webvpn_login_required": bool(source.get("network_mode") == "webvpn"
+                and not school_sessions.webvpn_authenticated(user["id"])) or bool(
+                source.get("network_mode") == "webvpn" and source.get("status") == "login_required"),
             "syncing": bool(sync_jobs.get((user["id"], manifest["id"])) and not sync_jobs[(user["id"], manifest["id"])].done()),
             "sync_progress": sync_progress.get((user["id"], manifest["id"])),
             "label": manifest["label"],
@@ -399,8 +488,8 @@ def events(
     user: dict[str, Any] = Depends(current_user),
 ):
     window = academic_window(db.preferences(user["id"]))
-    return [public_event(event) for event in db.list_events(user["id"], start=start, end=end)
-            if event_available(event) and in_academic_window(event, window)]
+    return merge_calendar([public_event(event) for event in db.list_events(user["id"], start=start, end=end)
+            if event_available(event) and in_academic_window(event, window)], (db.get_source(user["id"], "iclass") or {}).get("enabled", False))
 
 
 @app.post("/api/events", status_code=201)
@@ -436,23 +525,26 @@ async def sync_sources(user: dict[str, Any] = Depends(csrf_user)):
 @app.post("/api/sources/{source_id}/sync", status_code=202)
 async def sync_source(source_id: str, user: dict[str, Any] = Depends(csrf_user)):
     require_available(source_id in ACTIVE_SOURCES)
-    if not (db.get_source(user["id"], source_id) or {}).get("enabled", True):
+    if not (db.get_source(user["id"], source_id) or {}).get("enabled", source_id != "iclass"):
         raise HTTPException(status_code=409, detail="请先启用此来源")
     return {"started": list(start_sync(user["id"], {source_id}))}
 
 
 @app.patch("/api/sources/{source_id}")
 def update_source(source_id: str, payload: SourceUpdate, user: dict[str, Any] = Depends(csrf_user)):
-    if source_id not in ACTIVE_SOURCES:
+    if source_id not in SCHOOL_SOURCES:
+        raise HTTPException(status_code=404, detail="source_not_found")
+    if source_id not in ACTIVE_SOURCES and (payload.enabled is not None or payload.refresh_interval_minutes is not None or payload.network_mode is None):
         raise HTTPException(status_code=403, detail="Coming Soon")
-    if payload.network_mode is not None:
-        if source_id != "judge":
-            raise HTTPException(status_code=422, detail="目前仅 JUDGE 支持 WebVPN 模式")
+    if payload.network_mode is not None or db.get_source(user["id"], source_id) is None:
         running = sync_jobs.get((user["id"], source_id))
         if running and not running.done():
             raise HTTPException(status_code=409, detail="请等待当前同步完成后切换访问模式")
+        if source_id == "iclass" and attendance_service.locks.get(user["id"]) and attendance_service.locks[user["id"]].locked():
+            raise HTTPException(status_code=409, detail="请等待当前签到检查完成后切换访问模式")
         if db.get_source(user["id"], source_id) is None:
-            db.upsert_source(user["id"], {"id": source_id, "label": JudgeAdapter.label, "status": "not_connected"})
+            label = next(m["label"] for m in connectors(user) if m["id"] == source_id)
+            db.upsert_source(user["id"], {"id": source_id, "label": label, "status": "not_connected"})
     source = db.update_source_settings(
         user["id"], source_id,
         enabled=payload.enabled,
@@ -461,8 +553,7 @@ def update_source(source_id: str, payload: SourceUpdate, user: dict[str, Any] = 
     )
     if source is None:
         raise HTTPException(status_code=404, detail="source_not_found")
-    if payload.enabled:
-        rule_engine.plan_user(user["id"])
+    RuleEngine(db, enforce_feature_scope=True).plan_user(user["id"])
     db.audit(user["id"], "update", "source", source_id, payload.model_dump(exclude_none=True))
     return source
 
@@ -492,12 +583,13 @@ def create_rule(payload: AutomationRuleCreate, user: dict[str, Any] = Depends(cs
 @app.put("/api/rules/{rule_id}")
 def replace_rule(rule_id: int, payload: AutomationRuleCreate, user: dict[str, Any] = Depends(csrf_user)):
     current = db.get_automation_rule(user["id"], rule_id)
-    if current and (not rule_available(current) or not rule_available(payload.model_dump())):
+    if current and (not rule_available(payload.model_dump()) or
+            (not rule_available(current) and not (public_rule(current)["availability"] == "needs_configuration" and payload.profile == "signin"))):
         raise HTTPException(status_code=403, detail="Coming Soon")
     rule = db.update_automation_rule(user["id"], rule_id, payload.model_dump())
     if rule is None:
         raise HTTPException(status_code=404, detail="rule_not_found")
-    rule_engine.plan_user(user["id"])
+    RuleEngine(db, enforce_feature_scope=True).plan_user(user["id"])
     db.audit(user["id"], "update", "rule", str(rule_id))
     return rule
 

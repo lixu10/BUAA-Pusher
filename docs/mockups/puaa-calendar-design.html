@@ -1,0 +1,298 @@
+<div id="puaa-design" class="puaa-shell" aria-label="PUAA 日历界面设计">
+  <style>
+    #puaa-design {
+      color-scheme: light dark;
+      --p-bg: light-dark(#f5f7fa, #0d1422);
+      --p-paper: light-dark(#ffffff, #151f31);
+      --p-paper-2: light-dark(#f8faff, #19263a);
+      --p-ink: light-dark(#172033, #edf3fc);
+      --p-muted: light-dark(#69798f, #9cacc1);
+      --p-line: light-dark(#d9e1eb, #304159);
+      --p-blue: light-dark(#145dd7, #6ca2ff);
+      --p-blue-soft: light-dark(#e9f1ff, #1d3559);
+      --p-red: light-dark(#c9384b, #ff8492);
+      --p-red-soft: light-dark(#fff0f2, #41242e);
+      --p-amber: light-dark(#a85e00, #ffbd65);
+      --p-amber-soft: light-dark(#fff4df, #3c3020);
+      --p-green: light-dark(#18765c, #5bd6b1);
+      --p-nav: light-dark(#101e34, #080e19);
+      display: grid;
+      grid-template-columns: 176px minmax(0, 1fr);
+      min-height: 720px;
+      overflow: hidden;
+      border-radius: 12px;
+      background: var(--p-bg);
+      color: var(--p-ink);
+      font-family: "Noto Sans SC", "Microsoft YaHei UI", sans-serif;
+    }
+    #puaa-design * { box-sizing: border-box; }
+    #puaa-design button { font: inherit; }
+    #puaa-design .p-nav {
+      display: flex;
+      flex-direction: column;
+      padding: 18px 12px;
+      background: var(--p-nav);
+      color: #dbe8fa;
+    }
+    #puaa-design .p-brand { display: flex; align-items: center; gap: 9px; min-height: 40px; padding: 0 10px 18px; font-weight: 650; }
+    #puaa-design .p-mark { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; background: #246eee; color: #fff; }
+    #puaa-design .p-links { display: grid; gap: 4px; }
+    #puaa-design .p-link { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; color: #9eb0c9; text-align: left; }
+    #puaa-design .p-link[aria-current="page"] { background: #203654; color: #fff; }
+    #puaa-design .p-link svg { width: 16px; height: 16px; }
+    #puaa-design .p-user { display: flex; align-items: center; gap: 9px; margin-top: auto; padding: 13px 8px 2px; border-top: 1px solid #2a3c55; color: #b8c8dc; font-size: 12px; }
+    #puaa-design .p-user-dot { width: 8px; height: 8px; border-radius: 50%; background: #4fd0a7; }
+    #puaa-design .p-app { min-width: 0; }
+    #puaa-design .p-topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 74px; padding: 13px 24px; border-bottom: 1px solid var(--p-line); background: var(--p-paper); }
+    #puaa-design .p-date-nav, #puaa-design .p-actions, #puaa-design .p-view-tabs { display: flex; align-items: center; gap: 7px; }
+    #puaa-design .p-date-title { min-width: 150px; margin: 0 8px; font-size: 20px; font-weight: 650; }
+    #puaa-design .p-icon, #puaa-design .p-action, #puaa-design .p-view {
+      min-height: 34px;
+      border: 1px solid var(--p-line);
+      border-radius: 7px;
+      background: var(--p-paper);
+      color: var(--p-ink);
+    }
+    #puaa-design .p-icon { display: grid; place-items: center; width: 34px; padding: 0; }
+    #puaa-design .p-icon svg, #puaa-design .p-action svg { width: 15px; height: 15px; }
+    #puaa-design .p-action { display: flex; align-items: center; gap: 7px; padding: 0 11px; }
+    #puaa-design .p-action.primary { border-color: var(--p-blue); background: var(--p-blue); color: #fff; }
+    #puaa-design .p-view-tabs { padding: 3px; border-radius: 8px; background: var(--p-bg); }
+    #puaa-design .p-view { min-height: 29px; padding: 0 10px; border: 0; background: transparent; color: var(--p-muted); }
+    #puaa-design .p-view[aria-selected="true"] { background: var(--p-paper); color: var(--p-ink); box-shadow: 0 1px 3px color-mix(in srgb, var(--p-ink) 14%, transparent); }
+    #puaa-design .p-work { padding: 18px 24px 24px; }
+    #puaa-design .p-status { display: flex; align-items: center; gap: 10px; min-height: 34px; margin-bottom: 12px; color: var(--p-muted); font-size: 12px; }
+    #puaa-design .p-status strong { color: var(--p-ink); font-weight: 500; }
+    #puaa-design .p-status .warn { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; color: var(--p-red); }
+    #puaa-design .p-week { display: grid; grid-template-columns: 60px repeat(7, minmax(92px, 1fr)); overflow: hidden; border: 1px solid var(--p-line); border-radius: 9px; background: var(--p-paper); }
+    #puaa-design .p-corner, #puaa-design .p-day-head { min-height: 66px; border-bottom: 1px solid var(--p-line); background: var(--p-paper-2); }
+    #puaa-design .p-corner { display: grid; place-items: center; color: var(--p-muted); font-size: 11px; }
+    #puaa-design .p-day-head { padding: 10px; border-left: 1px solid var(--p-line); }
+    #puaa-design .p-day-head span { display: block; color: var(--p-muted); font-size: 11px; }
+    #puaa-design .p-day-head strong { display: block; margin-top: 3px; font-size: 15px; font-weight: 500; }
+    #puaa-design .p-day-head.today { color: var(--p-blue); background: var(--p-blue-soft); }
+    #puaa-design .p-day-head.today span { color: var(--p-blue); }
+    #puaa-design .p-deadline-label { display: grid; place-items: center; min-height: 44px; border-bottom: 1px solid var(--p-line); color: var(--p-muted); font-size: 11px; }
+    #puaa-design .p-deadline-cell { min-height: 44px; padding: 6px; border-left: 1px solid var(--p-line); border-bottom: 1px solid var(--p-line); }
+    #puaa-design .p-deadline { width: 100%; overflow: hidden; padding: 4px 6px; border: 0; border-radius: 5px; background: var(--p-amber-soft); color: var(--p-amber); text-align: left; font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
+    #puaa-design .p-hours { position: relative; height: 450px; border-right: 0; background: var(--p-paper); }
+    #puaa-design .p-hour { position: absolute; left: 0; right: 0; height: 1px; background: var(--p-line); }
+    #puaa-design .p-hour span { position: absolute; top: -9px; right: 8px; padding: 0 3px; background: var(--p-paper); color: var(--p-muted); font: 11px/18px Inter, sans-serif; }
+    #puaa-design .p-day-col { position: relative; height: 450px; border-left: 1px solid var(--p-line); background-image: repeating-linear-gradient(to bottom, transparent 0, transparent 44px, color-mix(in srgb, var(--p-line) 64%, transparent) 45px); }
+    #puaa-design .p-day-col.today { background-color: color-mix(in srgb, var(--p-blue-soft) 30%, transparent); }
+    #puaa-design .p-event { position: absolute; left: 5px; right: 5px; overflow: hidden; padding: 6px 7px; border: 0; border-left: 3px solid var(--p-blue); border-radius: 5px; background: var(--p-blue-soft); color: var(--p-ink); text-align: left; }
+    #puaa-design .p-event strong { display: block; overflow: hidden; font-size: 11px; font-weight: 650; white-space: nowrap; text-overflow: ellipsis; }
+    #puaa-design .p-event span { display: block; overflow: hidden; margin-top: 2px; color: var(--p-muted); font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
+    #puaa-design .p-event.boya { border-left-color: var(--p-green); background: color-mix(in srgb, var(--p-green) 12%, var(--p-paper)); }
+    #puaa-design .p-event.exam { border-left-color: var(--p-red); background: var(--p-red-soft); }
+    #puaa-design .p-now { position: absolute; z-index: 3; left: 0; right: 0; height: 1px; background: var(--p-red); }
+    #puaa-design .p-now::before { content: ""; position: absolute; left: -4px; top: -4px; width: 8px; height: 8px; border-radius: 50%; background: var(--p-red); }
+    #puaa-design .p-alt { display: none; min-height: 560px; border: 1px solid var(--p-line); border-radius: 9px; background: var(--p-paper); }
+    #puaa-design .p-alt.active { display: block; }
+    #puaa-design .p-list { padding: 4px 18px; }
+    #puaa-design .p-list-date { padding: 18px 0 8px; color: var(--p-muted); font-size: 12px; font-weight: 500; }
+    #puaa-design .p-list-row { display: grid; grid-template-columns: 70px 1fr 140px 80px; align-items: center; gap: 14px; min-height: 54px; border-bottom: 1px solid var(--p-line); }
+    #puaa-design .p-list-row strong { font-size: 13px; font-weight: 500; }
+    #puaa-design .p-list-row span { color: var(--p-muted); font-size: 12px; }
+    #puaa-design .p-month { display: grid; grid-template-columns: repeat(7, 1fr); }
+    #puaa-design .p-month-day { min-height: 105px; padding: 9px; border-right: 1px solid var(--p-line); border-bottom: 1px solid var(--p-line); }
+    #puaa-design .p-month-day:nth-child(7n) { border-right: 0; }
+    #puaa-design .p-month-day b { font-size: 12px; font-weight: 500; }
+    #puaa-design .p-month-day.outside { opacity: .48; }
+    #puaa-design .p-month-item { display: block; overflow: hidden; margin-top: 7px; color: var(--p-muted); font-size: 10px; white-space: nowrap; text-overflow: ellipsis; }
+    #puaa-design .p-month-item.critical { color: var(--p-red); }
+    #puaa-design .p-day-view { max-width: 680px; margin: 0 auto; padding: 20px; }
+    #puaa-design .p-agenda-item { display: grid; grid-template-columns: 70px 14px 1fr; gap: 10px; min-height: 72px; }
+    #puaa-design .p-agenda-item time { padding-top: 3px; font: 500 13px Inter, sans-serif; }
+    #puaa-design .p-agenda-rail { position: relative; }
+    #puaa-design .p-agenda-rail::after { content: ""; position: absolute; top: 10px; bottom: -8px; left: 6px; width: 1px; background: var(--p-line); }
+    #puaa-design .p-agenda-rail::before { content: ""; position: absolute; z-index: 1; top: 5px; left: 2px; width: 9px; height: 9px; border-radius: 50%; background: var(--p-blue); }
+    #puaa-design .p-agenda-item:last-child .p-agenda-rail::after { display: none; }
+    #puaa-design .p-agenda-copy strong { display: block; font-size: 13px; font-weight: 500; }
+    #puaa-design .p-agenda-copy span { display: block; margin-top: 4px; color: var(--p-muted); font-size: 11px; }
+    #puaa-design .p-detail { position: absolute; z-index: 5; top: 74px; right: 0; bottom: 0; width: 330px; padding: 22px; border-left: 1px solid var(--p-line); background: var(--p-paper); box-shadow: -14px 0 30px color-mix(in srgb, var(--p-ink) 10%, transparent); transform: translateX(102%); transition: transform .18s ease; }
+    #puaa-design .p-detail.open { transform: translateX(0); }
+    #puaa-design .p-detail-head { display: flex; justify-content: space-between; align-items: center; }
+    #puaa-design .p-detail h3 { margin: 24px 0 8px; font-size: 18px; font-weight: 650; }
+    #puaa-design .p-detail dl { display: grid; grid-template-columns: 58px 1fr; gap: 12px 10px; margin: 20px 0; font-size: 12px; }
+    #puaa-design .p-detail dt { color: var(--p-muted); }
+    #puaa-design .p-detail dd { margin: 0; }
+    #puaa-design .p-detail-rule { padding: 12px; border-radius: 7px; background: var(--p-blue-soft); font-size: 12px; }
+    #puaa-design .p-app { position: relative; }
+    @media (max-width: 800px) {
+      #puaa-design { grid-template-columns: 64px minmax(0, 1fr); }
+      #puaa-design .p-brand span:last-child, #puaa-design .p-link span, #puaa-design .p-user span:last-child { display: none; }
+      #puaa-design .p-brand, #puaa-design .p-link, #puaa-design .p-user { justify-content: center; }
+      #puaa-design .p-topbar { align-items: flex-start; flex-wrap: wrap; padding: 12px 14px; }
+      #puaa-design .p-view-tabs { order: 3; width: 100%; }
+      #puaa-design .p-view { flex: 1; }
+      #puaa-design .p-work { padding: 12px 14px 18px; }
+      #puaa-design .p-week-panel { display: none; }
+      #puaa-design .p-detail { top: 113px; width: min(330px, calc(100% - 28px)); }
+    }
+  </style>
+
+  <aside class="p-nav">
+    <div class="p-brand"><span class="p-mark">P</span><span>PUAA</span></div>
+    <nav class="p-links" aria-label="产品导航">
+      <button class="p-link"><i data-lucide="sun" aria-hidden="true"></i><span>今日</span></button>
+      <button class="p-link" aria-current="page"><i data-lucide="calendar-days" aria-hidden="true"></i><span>日历</span></button>
+      <button class="p-link"><i data-lucide="list-checks" aria-hidden="true"></i><span>待办</span></button>
+      <button class="p-link"><i data-lucide="bell" aria-hidden="true"></i><span>提醒</span></button>
+      <button class="p-link"><i data-lucide="plug" aria-hidden="true"></i><span>连接</span></button>
+      <button class="p-link"><i data-lucide="send" aria-hidden="true"></i><span>通知渠道</span></button>
+    </nav>
+    <div class="p-user"><span class="p-user-dot"></span><span>用户 · 已连接北航</span></div>
+  </aside>
+
+  <section class="p-app">
+    <header class="p-topbar">
+      <div class="p-date-nav">
+        <button class="p-icon" aria-label="上一周"><i data-lucide="chevron-left" aria-hidden="true"></i></button>
+        <h1 class="p-date-title">9月14日—20日</h1>
+        <button class="p-icon" aria-label="下一周"><i data-lucide="chevron-right" aria-hidden="true"></i></button>
+        <button class="p-action" type="button">今天</button>
+      </div>
+      <div class="p-view-tabs" role="tablist" aria-label="日历视图">
+        <button class="p-view" data-view="day" role="tab" aria-selected="false">日</button>
+        <button class="p-view" data-view="week" role="tab" aria-selected="true">周</button>
+        <button class="p-view" data-view="month" role="tab" aria-selected="false">月</button>
+        <button class="p-view" data-view="agenda" role="tab" aria-selected="false">日程</button>
+      </div>
+      <div class="p-actions">
+        <button class="p-icon" aria-label="搜索"><i data-lucide="search" aria-hidden="true"></i></button>
+        <button class="p-action primary"><i data-lucide="plus" aria-hidden="true"></i>新建</button>
+      </div>
+    </header>
+
+    <main class="p-work">
+      <div class="p-status"><strong>第 3 教学周</strong><span>6 个来源 · 2 分钟前同步</span><span class="warn"><i data-lucide="circle-alert" aria-hidden="true"></i>iClass 需重新登录</span></div>
+
+      <section class="p-week-panel" data-panel="week">
+        <div class="p-week" aria-label="本周日历">
+          <div class="p-corner">时间</div>
+          <div class="p-day-head"><span>周一</span><strong>14</strong></div>
+          <div class="p-day-head"><span>周二</span><strong>15</strong></div>
+          <div class="p-day-head"><span>周三</span><strong>16</strong></div>
+          <div class="p-day-head"><span>周四</span><strong>17</strong></div>
+          <div class="p-day-head"><span>周五</span><strong>18</strong></div>
+          <div class="p-day-head today"><span>周六</span><strong>19</strong></div>
+          <div class="p-day-head"><span>周日</span><strong>20</strong></div>
+
+          <div class="p-deadline-label">截止</div>
+          <div class="p-deadline-cell"></div>
+          <div class="p-deadline-cell"><button class="p-deadline" data-event="数据结构 · 作业 4" type="button">23:59 作业 4</button></div>
+          <div class="p-deadline-cell"></div>
+          <div class="p-deadline-cell"><button class="p-deadline" data-event="SPOC 单元测验" type="button">20:00 单元测验</button></div>
+          <div class="p-deadline-cell"></div>
+          <div class="p-deadline-cell"></div>
+          <div class="p-deadline-cell"></div>
+
+          <div class="p-hours">
+            <div class="p-hour" style="top:45px"><span>09:00</span></div>
+            <div class="p-hour" style="top:135px"><span>11:00</span></div>
+            <div class="p-hour" style="top:225px"><span>14:00</span></div>
+            <div class="p-hour" style="top:315px"><span>16:00</span></div>
+            <div class="p-hour" style="top:405px"><span>18:00</span></div>
+          </div>
+          <div class="p-day-col"><button class="p-event" data-event="高等数学" style="top:45px;height:78px"><strong>高等数学</strong><span>09:00 · 沙河 J0-002</span></button></div>
+          <div class="p-day-col"><button class="p-event" data-event="大学物理" style="top:139px;height:78px"><strong>大学物理</strong><span>11:05 · 主 M401</span></button></div>
+          <div class="p-day-col"><button class="p-event boya" data-event="博雅课程" style="top:228px;height:76px"><strong>博雅课程</strong><span>14:00 · 学术交流厅</span></button></div>
+          <div class="p-day-col"><button class="p-event" data-event="软件工程" style="top:48px;height:76px"><strong>软件工程</strong><span>09:05 · 新主 F101</span></button></div>
+          <div class="p-day-col"><button class="p-event exam" data-event="离散数学期中" style="top:226px;height:98px"><strong>离散数学期中</strong><span>14:00 · 主 M401</span></button></div>
+          <div class="p-day-col today"><div class="p-now" style="top:286px"></div><button class="p-event" data-event="软件工程" style="top:183px;height:76px"><strong>软件工程</strong><span>13:05 · 新主 F101</span></button></div>
+          <div class="p-day-col"><button class="p-event boya" data-event="图书馆研讨室" style="top:318px;height:62px"><strong>图书馆研讨室</strong><span>16:05 · 学院路</span></button></div>
+        </div>
+      </section>
+
+      <section class="p-alt p-mobile-day" data-panel="day">
+        <div class="p-day-view">
+          <div class="p-list-date">9月19日 · 周六</div>
+          <div class="p-agenda-item"><time>13:05</time><span class="p-agenda-rail"></span><div class="p-agenda-copy"><strong>软件工程</strong><span>新主楼 F101 · 教务</span></div></div>
+          <div class="p-agenda-item"><time>15:10</time><span class="p-agenda-rail"></span><div class="p-agenda-copy"><strong>软件工程签到检查</strong><span>仍未签到时发送邮件</span></div></div>
+          <div class="p-agenda-item"><time>20:00</time><span class="p-agenda-rail"></span><div class="p-agenda-copy"><strong>SPOC 单元测验截止</strong><span>待完成 · 2 小时前提醒</span></div></div>
+        </div>
+      </section>
+
+      <section class="p-alt" data-panel="month">
+        <div class="p-month" aria-label="九月月历">
+          <div class="p-month-day outside"><b>31</b></div><div class="p-month-day"><b>1</b><span class="p-month-item">高等数学</span></div><div class="p-month-day"><b>2</b></div><div class="p-month-day"><b>3</b><span class="p-month-item">软件工程</span></div><div class="p-month-day"><b>4</b></div><div class="p-month-day"><b>5</b></div><div class="p-month-day"><b>6</b></div>
+          <div class="p-month-day"><b>7</b><span class="p-month-item">高等数学</span></div><div class="p-month-day"><b>8</b><span class="p-month-item">大学物理</span></div><div class="p-month-day"><b>9</b><span class="p-month-item">博雅课程</span></div><div class="p-month-day"><b>10</b><span class="p-month-item">软件工程</span></div><div class="p-month-day"><b>11</b></div><div class="p-month-day"><b>12</b></div><div class="p-month-day"><b>13</b></div>
+          <div class="p-month-day"><b>14</b><span class="p-month-item">高等数学</span></div><div class="p-month-day"><b>15</b><span class="p-month-item">大学物理</span><span class="p-month-item critical">作业 4 截止</span></div><div class="p-month-day"><b>16</b><span class="p-month-item">博雅课程</span></div><div class="p-month-day"><b>17</b><span class="p-month-item">软件工程</span><span class="p-month-item critical">单元测验</span></div><div class="p-month-day"><b>18</b><span class="p-month-item critical">离散数学期中</span></div><div class="p-month-day"><b>19</b><span class="p-month-item">软件工程</span></div><div class="p-month-day"><b>20</b><span class="p-month-item">图书馆研讨室</span></div>
+          <div class="p-month-day"><b>21</b><span class="p-month-item">高等数学</span></div><div class="p-month-day"><b>22</b></div><div class="p-month-day"><b>23</b><span class="p-month-item">博雅课程</span></div><div class="p-month-day"><b>24</b><span class="p-month-item">软件工程</span></div><div class="p-month-day"><b>25</b></div><div class="p-month-day"><b>26</b><span class="p-month-item critical">JUDGE 截止</span></div><div class="p-month-day"><b>27</b></div>
+          <div class="p-month-day"><b>28</b><span class="p-month-item">高等数学</span></div><div class="p-month-day"><b>29</b><span class="p-month-item">大学物理</span></div><div class="p-month-day"><b>30</b></div><div class="p-month-day outside"><b>1</b></div><div class="p-month-day outside"><b>2</b></div><div class="p-month-day outside"><b>3</b></div><div class="p-month-day outside"><b>4</b></div>
+        </div>
+      </section>
+
+      <section class="p-alt" data-panel="agenda">
+        <div class="p-list">
+          <div class="p-list-date">9月19日 · 今天</div>
+          <div class="p-list-row"><span>13:05</span><strong>软件工程</strong><span>新主楼 F101</span><span>教务</span></div>
+          <div class="p-list-row"><span>20:00</span><strong>SPOC 单元测验截止</strong><span>待完成</span><span>SPOC</span></div>
+          <div class="p-list-date">9月20日 · 周日</div>
+          <div class="p-list-row"><span>16:05</span><strong>图书馆研讨室</strong><span>学院路校区</span><span>图书馆</span></div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="p-detail" aria-live="polite" aria-hidden="true" inert>
+      <div class="p-detail-head"><span>日程详情</span><button class="p-icon p-detail-close" aria-label="关闭详情"><i data-lucide="x" aria-hidden="true"></i></button></div>
+      <h3 class="p-detail-title">软件工程</h3>
+      <dl><dt>时间</dt><dd>9月19日 13:05–14:40</dd><dt>地点</dt><dd>新主楼 F101</dd><dt>来源</dt><dd>本科教务 · 2 分钟前</dd><dt>状态</dt><dd>未开始</dd></dl>
+      <div class="p-detail-rule">上课前 15 分钟提醒</div>
+    </aside>
+  </section>
+
+  <script>
+    (() => {
+      const root = document.getElementById('puaa-design');
+      const tabs = [...root.querySelectorAll('[data-view]')];
+      const panels = [...root.querySelectorAll('[data-panel]')];
+      const week = root.querySelector('.p-week-panel');
+      const detail = root.querySelector('.p-detail');
+      const title = root.querySelector('.p-detail-title');
+      const dateTitle = root.querySelector('.p-date-title');
+
+      const designState = { view: 'week', compactNavigation: false };
+
+      function selectView(name) {
+        if (window.matchMedia('(max-width: 800px)').matches && name === 'week') name = 'day';
+        designState.view = name;
+        dateTitle.textContent = ({ day: '9月19日 周六', week: '9月14日—20日', month: '2026年9月', agenda: '未来日程' })[name];
+        tabs.forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.view === name)));
+        week.style.display = name === 'week' ? 'block' : 'none';
+        panels.forEach(panel => panel.classList.toggle('active', panel.dataset.panel === name));
+      }
+      tabs.forEach(tab => tab.addEventListener('click', () => selectView(tab.dataset.view)));
+      root.querySelectorAll('[data-event]').forEach(event => event.addEventListener('click', () => {
+        title.textContent = event.dataset.event;
+        detail.classList.add('open');
+        detail.removeAttribute('inert');
+        detail.setAttribute('aria-hidden', 'false');
+      }));
+      root.querySelector('.p-detail-close').addEventListener('click', () => {
+        detail.classList.remove('open');
+        detail.setAttribute('inert', '');
+        detail.setAttribute('aria-hidden', 'true');
+      });
+
+      function renderDesign() {
+        root.style.gridTemplateColumns = designState.compactNavigation ? '64px minmax(0, 1fr)' : '';
+        root.querySelectorAll('.p-brand > span:last-child, .p-link > span, .p-user > span:last-child').forEach(label => {
+          label.style.display = designState.compactNavigation ? 'none' : '';
+        });
+        selectView(designState.view);
+      }
+      renderDesign();
+
+      if (globalThis.Tweak) {
+        const tweak = new Tweak({ container: root, onChange: renderDesign });
+        tweak.addSelect(designState, 'view', { label: '默认日历视图', options: [
+          { label: '日', value: 'day' }, { label: '周', value: 'week' },
+          { label: '月', value: 'month' }, { label: '日程', value: 'agenda' }
+        ], reference: 'calendar.view' });
+        tweak.addToggle(designState, 'compactNavigation', { label: '紧凑导航', reference: 'navigation.compact' });
+      }
+    })();
+  </script>
+</div>

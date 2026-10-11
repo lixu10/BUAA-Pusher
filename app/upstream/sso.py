@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from html.parser import HTMLParser
 from typing import Any
 
@@ -99,6 +100,9 @@ class BuaaSsoSession:
         self.username: str | None = None
         self.user: dict[str, Any] | None = None
         self.iclass_identity: tuple[str, str, str, float] | None = None
+        self.reauthentication_error: str | None = None
+        self.reauthentication_retry_at: float | None = None
+        self.last_authenticated_at: float | None = None
         self._form: dict[str, str] = {}
         self._captcha_id: str | None = None
         self._login_url = SSO_URL
@@ -163,25 +167,33 @@ class BuaaSsoSession:
                 })
 
         await self.client.get(UC_LOGIN_URL)
-        status = await self.refresh_status()
+        status = await self.refresh_status(strict=True)
         if not status["authenticated"]:
             self._form = {}
             raise LoginFailed("统一认证成功，但用户中心会话校验失败")
         self.username = username
         self._form = {}
+        self.reauthentication_error = None
+        self.reauthentication_retry_at = None
+        self.last_authenticated_at = time.monotonic()
         return status
 
-    async def refresh_status(self) -> dict[str, Any]:
+    async def refresh_status(self, strict: bool = False) -> dict[str, Any]:
         try:
             response = await self.client.get(
                 UC_STATUS_URL,
                 headers={"Accept": "application/json, text/javascript, */*; q=0.01", "X-Requested-With": "XMLHttpRequest"},
             )
+            if strict and response.status_code not in {200, 401, 403}:
+                response.raise_for_status()
             payload = response.json()
             if response.status_code == 200 and payload.get("code") == 0 and isinstance(payload.get("data"), dict):
                 self.user = payload["data"]
                 return {"authenticated": True, "user": self.user}
-        except (httpx.HTTPError, ValueError):
+        except httpx.HTTPError:
+            if strict:
+                raise
+        except ValueError:
             pass
         self.user = None
         return {"authenticated": False, "user": None}

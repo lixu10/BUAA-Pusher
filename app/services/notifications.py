@@ -115,15 +115,16 @@ class NotificationSender:
 
 
 class TriggerDispatcher:
-    def __init__(self, db: Database, sender: NotificationSender, enforce_feature_scope: bool = False):
+    def __init__(self, db: Database, sender: NotificationSender, enforce_feature_scope: bool = False, attendance_checker=None):
         self.db, self.sender = db, sender
         self.enforce_feature_scope = enforce_feature_scope
+        self.attendance_checker = attendance_checker
 
     async def dispatch_due(self) -> int:
         processed = 0
         for trigger in self.db.due_triggers():
             context = self.db.trigger_context(trigger["id"])
-            if not context:
+            if not context or context.get("status") != "queued":
                 continue
             event = {
                 "title": context["title"], "kind": context["kind"], "source": context["source"],
@@ -133,8 +134,9 @@ class TriggerDispatcher:
                 "ignored": context.get("ignored", False),
             }
             definition = context["definition"]
+            signin = definition.get("profile") == "signin"
             change = context.get("change")
-            matches = change_matches(definition, change, event) if change else reminder_matches(definition, event)
+            matches = not event.get("ignored") if signin else change_matches(definition, change, event) if change else reminder_matches(definition, event)
             if not matches or (self.enforce_feature_scope and not in_academic_window(
                 event, academic_window(self.db.preferences(trigger["user_id"]))
             )):
@@ -143,7 +145,7 @@ class TriggerDispatcher:
                 continue
             if self.enforce_feature_scope and (
                 not event_available(event) or not rule_available(definition)
-                or not (self.db.get_source(trigger["user_id"], event["source"]) or {}).get("enabled", True)
+                or not (self.db.get_source(trigger["user_id"], "iclass" if signin else event["source"]) or {}).get("enabled", not signin)
             ):
                 self.db.finish_trigger(trigger["id"], "cancelled", "功能未启用 / Coming Soon")
                 processed += 1
@@ -159,6 +161,17 @@ class TriggerDispatcher:
                 self.db.finish_trigger(trigger["id"], "skipped", "触发条件不成立")
                 processed += 1
                 continue
+            if signin:
+                end = RuleEngine.parse_time(event.get("ends_at"))
+                if not end or datetime.now(UTC) > end + timedelta(seconds=30) or not self.attendance_checker:
+                    self.db.finish_trigger(trigger["id"], "skipped", "签到检查已过期或不可用")
+                    processed += 1
+                    continue
+                result, detail = await self.attendance_checker(trigger["user_id"], context, event, definition)
+                if result != "missing":
+                    self.db.finish_trigger(trigger["id"], "cancelled" if result == "done" else "failed" if result == "error" else "skipped", detail)
+                    processed += 1
+                    continue
             quiet = self._quiet_decision(trigger["user_id"], definition.get("quiet_hours_policy", "delay"))
             # Deadline alerts must never arrive at/after the deadline, including
             # delayed quiet-hours messages and retry attempts.
@@ -174,6 +187,10 @@ class TriggerDispatcher:
                 processed += 1
                 continue
             if isinstance(quiet, datetime):
+                if signin and quiet.astimezone(UTC) > end:
+                    self.db.finish_trigger(trigger["id"], "skipped", "课程结束前无可发送时机")
+                    processed += 1
+                    continue
                 self.db.reschedule_trigger(trigger["id"], quiet.astimezone(UTC).isoformat(), "延后至安静时段结束")
                 processed += 1
                 continue
@@ -182,7 +199,7 @@ class TriggerDispatcher:
                 body = self._message_body(context, event)
                 await self.sender.send(
                     trigger["user_id"], action["channel"], action.get("channel_id"),
-                    context["title"], body, trigger["id"],
+                    f"{context['title']}未签到" if signin else context["title"], body, trigger["id"],
                 )
                 self.db.finish_trigger(trigger["id"], "sent")
             except Exception as exc:
@@ -202,6 +219,8 @@ class TriggerDispatcher:
 
     @staticmethod
     def _message_body(context: dict[str, Any], event: dict[str, Any]) -> str:
+        if (context.get("definition") or {}).get("profile") == "signin":
+            return "\n".join(filter(None, ["查询结果：未签到", event.get("starts_at"), event.get("location"), context.get("rule_name")]))
         change = context.get("change")
         if change:
             if change["type"] == "course-change":

@@ -12,12 +12,13 @@ from app.services.event_state import public_event, reminder_matches
 
 class CourseReminderTest(unittest.IsolatedAsyncioTestCase):
     async def test_internal_and_bulk_sync_never_create_iclass_client(self):
-        with patch.object(main.school_sessions, "get", new=AsyncMock()) as get_session, \
+        isolated = Database(":memory:"); isolated.init()
+        with patch.object(main, "db", isolated), patch.object(main.school_sessions, "get", new=AsyncMock()) as get_session, \
                 patch.object(main, "IClassAdapter", side_effect=AssertionError("iClass forbidden")):
             self.assertEqual(0, await main.sync_one(1, "iclass"))
             self.assertEqual({}, main.start_sync(1, {"iclass"}))
             get_session.assert_not_awaited()
-        self.assertNotIn("iclass", ACTIVE_SOURCES)
+        self.assertIn("iclass", ACTIVE_SOURCES)  # Available, but opt-in and default disabled.
         self.assertTrue(event_available({"source": "byxt", "kind": "course"}))
         self.assertFalse(event_available({"source": "byxt", "kind": "exam"}))
         self.assertFalse(event_available({"source": "iclass", "kind": "signin"}))

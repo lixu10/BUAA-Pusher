@@ -58,7 +58,8 @@ function statusLabel(event) {
   if (meta.total_problems) label += ` ${meta.submitted_count || 0}/${meta.total_problems}`;
   return label;
 }
-function statusBadge(event) { return `<span class="task-status ${event.ignored ? "ignored" : isCompleted(event) ? "complete" : ""}">${esc(statusLabel(event))}</span>`; }
+function attendanceLabel(event) { return event.kind === "course" && event.attendance ? ({done:"已签到",missing:"未签到",unknown:"签到状态未知"})[event.attendance.status] || "签到状态未知" : ""; }
+function statusBadge(event) { return `<span class="task-status ${event.ignored ? "ignored" : isCompleted(event) ? "complete" : ""}">${esc(statusLabel(event))}</span>${attendanceLabel(event) ? `<span class="attendance-badge ${event.attendance.status === "done" ? "complete" : ""}">${esc(attendanceLabel(event))}</span>` : ""}`; }
 function visibleCalendarEvents() { return state.data.events.filter((event) => !event.ignored && (state.showCompleted || !isCompleted(event))); }
 function sourceLabel(id) { return ({ spoc: "SPOC", judge: "JUDGE", byxt: "课程提醒", iclass: "课程签到" })[id] || id; }
 function assignmentTypeLabel(type) { return /^\d+$/.test(String(type)) ? `类型 ${type}` : String(type); }
@@ -81,7 +82,7 @@ function eventTimeRange(event) {
   return end && end !== start ? `${start}–${end}` : start;
 }
 function eventDetails(event) {
-  return [eventTeacher(event), event.location].filter(Boolean).join("　");
+  return [eventTeacher(event), event.location, attendanceLabel(event)].filter(Boolean).join("　");
 }
 
 function empty(title, detail, icon = "bi-calendar2") {
@@ -123,7 +124,7 @@ function renderShell() {
   $("#school-state").textContent = state.school?.status === "connected" ? `${state.school.school_id} · 已连接` : state.school?.status === "degraded" ? `${state.school.school_id} · 部分异常` : state.school?.status === "login_required" ? "需要重新登录" : "未连接北航";
   $("#account-name").textContent = name; $("#account-email").textContent = state.user.email;
   $("#today-label").textContent = fmtDate(new Date(), { year: "numeric", month: "long", day: "numeric", weekday: "long" });
-  const availableSources = state.data.sources.filter((s) => s.available !== false);
+  const availableSources = state.data.sources.filter((s) => s.available !== false && s.enabled);
   const healthy = availableSources.filter((s) => s.status === "healthy").length;
   $("#source-summary").textContent = `${healthy}/${availableSources.length} 个来源正常`;
 }
@@ -289,7 +290,7 @@ const reminderProfiles = {
   "spoc-new-assignment": { name: "SPOC 新作业提醒", icon: "bi-journal-plus", summary: "同步发现新作业时提醒" },
   "judge-new-assignment": { name: "JUDGE 新作业提醒", icon: "bi-file-earmark-plus", summary: "同步发现新作业时提醒" },
   "spoc-assignment-grade": { name: "SPOC 作业新评分提醒", icon: "bi-check2-square", summary: "教师批阅、得分或评语更新时提醒" },
-  signin: { name: "课程签到提醒", icon: "bi-person-check", summary: "结束前检测签到状态" },
+  signin: { name: "未签到检查", icon: "bi-person-check", summary: "按检查点查询，未签到提醒" },
   library: { name: "图书馆预约提醒", icon: "bi-bookmark-check", summary: "开始与离开失效前提醒" },
   assignment: { name: "作业截止提醒", icon: "bi-code-square", summary: "截止前分级提醒" },
   exam: { name: "考试提醒", icon: "bi-pencil-square", summary: "考试前分级提醒" },
@@ -305,6 +306,7 @@ const connectionRuleTypes = {
   byxt: [["course", "课程提醒"], ["course-change", "课程变更提醒"]],
   spoc: [["spoc-assignment", "作业截止提醒"], ["spoc-new-assignment", "新作业提醒"], ["spoc-assignment-grade", "作业新评分提醒"]],
   judge: [["judge-assignment", "作业截止提醒"], ["judge-new-assignment", "新作业提醒"]],
+  iclass: [["signin", "未签到检查"]],
   assignments: [["assignment", "作业截止提醒（旧规则）"]],
 };
 const deadlineProfiles = new Set(["assignment", "spoc-assignment", "judge-assignment"]);
@@ -351,7 +353,7 @@ function inferRuleProfile(rule) {
 function profileSentence(rule) {
   const profile = inferRuleProfile(rule); const s = rule.profile_settings || {};
   if (profile === "course") { const settings = settingsFromRule(rule, profile); return `${settings.timing === "before_end" ? "课程结束前" : "上课前"} ${settings.advance_minutes} 分钟提醒`; }
-  if (profile === "signin") return `课程结束前 ${s.before_end ?? Math.abs(rule.trigger?.offset_minutes || 30)} 分钟检测，未签到提醒`;
+  if (profile === "signin") return `${settingsFromRule(rule, profile).check_times.map(checkTimeText).join("、")}检查，未签到提醒`;
   if (profile === "library") return `开始前 ${s.before_start ?? 30} 分钟，离开失效前 ${s.before_expiry ?? 15} 分钟提醒`;
   if (deadlineProfiles.has(profile)) return `截止前 ${deadlinePoints(rule).map(advanceText).join("、")}提醒`;
   if (profile === "course-change") return `同步发现${(s.change_types || []).map(key => courseChangeTypes[key]).join("、")}时提醒`;
@@ -374,7 +376,12 @@ function ruleSentence(rule) {
   return `${kinds}在${timing}${conditions}，通过 ${actions} 提醒`;
 }
 function renderRules() {
-  $("#rule-list").innerHTML = state.data.rules.length ? state.data.rules.map((rule) => { const profile = reminderProfiles[inferRuleProfile(rule)] || reminderProfiles.custom; const available = rule.available !== false; return `<article class="rule-card ${available ? "" : "coming-soon-card"}" ${available ? `data-edit-rule="${rule.id}"` : 'aria-disabled="true"'}><span class="row-icon"><i class="bi ${profile.icon}"></i></span><div><strong>${esc(rule.name)}</strong><div class="rule-sentence">${available ? esc(profileSentence(rule)) : "Coming Soon"}</div></div><div class="rule-actions"><span class="rule-state ${rule.enabled ? "" : "off"}">${available ? (rule.enabled ? "运行中" : "已停用") : "Coming Soon"}</span><label class="switch" aria-label="启用${esc(rule.name)}"><input type="checkbox" ${available ? `data-rule-toggle="${rule.id}"` : "disabled"} ${rule.enabled ? "checked" : ""}><span></span></label></div></article>`; }).join("") : `<div class="empty"><i class="bi bi-bell"></i><strong>还没有提醒</strong><button class="primary-button" data-new-rule>新建提醒</button></div>`;
+  $("#rule-list").innerHTML = state.data.rules.length ? state.data.rules.map((rule) => {
+    const profile = reminderProfiles[inferRuleProfile(rule)] || reminderProfiles.custom;
+    const available = rule.available !== false, configurable = rule.availability === "needs_configuration";
+    const label = available ? (rule.enabled ? "运行中" : "已停用") : configurable ? "待配置" : "Coming Soon";
+    return `<article class="rule-card ${available || configurable ? "" : "coming-soon-card"}" ${available || configurable ? `data-edit-rule="${rule.id}"` : 'aria-disabled="true"'}><span class="row-icon"><i class="bi ${profile.icon}"></i></span><div><strong>${esc(rule.name)}</strong><div class="rule-sentence">${available ? esc(profileSentence(rule)) : configurable ? "重新设置检查时间" : "Coming Soon"}</div></div><div class="rule-actions"><span class="rule-state ${rule.enabled ? "" : "off"}">${label}</span><label class="switch" aria-label="启用${esc(rule.name)}"><input type="checkbox" ${available ? `data-rule-toggle="${rule.id}"` : "disabled"} ${rule.enabled ? "checked" : ""}><span></span></label></div></article>`;
+  }).join("") : `<div class="empty"><i class="bi bi-bell"></i><strong>还没有提醒</strong><button class="primary-button" data-new-rule>新建提醒</button></div>`;
   $("#rule-list").innerHTML += Object.entries(reminderProfiles).filter(([key]) => !activeProfiles.has(key) && !state.data.rules.some((rule) => inferRuleProfile(rule) === key)).map(([, profile]) => `<article class="rule-card coming-soon-card" aria-disabled="true"><span class="row-icon"><i class="bi ${profile.icon}"></i></span><strong>${esc(profile.name)}</strong><span class="coming-soon-badge">Coming Soon</span></article>`).join("");
   $$('[data-edit-rule]').forEach((card) => card.addEventListener("click", (event) => { if (!event.target.closest(".switch")) openRuleDialog(state.data.rules.find((r) => r.id === Number(card.dataset.editRule))); }));
   $$('[data-rule-toggle]').forEach((input) => input.addEventListener("change", async () => { try { await api(`/api/rules/${input.dataset.ruleToggle}`, { method: "PATCH", body: JSON.stringify({ enabled: input.checked }) }); await loadDashboard(); toast("规则已保存"); } catch { input.checked = !input.checked; toast("保存失败"); } }));
@@ -394,13 +401,14 @@ function renderInbox() {
 }
 
 function renderSourceRow(source) {
-  if (source.available === false) return `<div class="source-row coming-soon-source" aria-disabled="true"><strong>${esc(source.label)}</strong><span class="coming-soon-badge">Coming Soon</span><label class="switch" aria-label="${esc(source.label)} Coming Soon"><input type="checkbox" disabled><span></span></label></div>`;
   const interval = Number(source.refresh_interval_minutes ?? 60), syncing = source.syncing || state.syncPending.has(source.id), progress = source.sync_progress;
+  const vpnMode = source.network_mode === "webvpn";
+  const modeSelect = `<select class="source-mode" data-source-mode="${esc(source.id)}" aria-label="${esc(source.label)}访问模式" ${syncing ? "disabled" : ""}><option value="direct" ${!vpnMode ? "selected" : ""}>直连（校内）</option><option value="webvpn" ${vpnMode ? "selected" : ""}>学校 WebVPN</option></select>`;
+  if (source.available === false) return `<div class="source-row coming-soon-source"><div class="source-name"><strong>${esc(source.label)}</strong>${modeSelect}</div><span class="coming-soon-badge">Coming Soon</span><label class="switch" aria-label="${esc(source.label)} Coming Soon"><input type="checkbox" disabled><span></span></label></div>`;
   const detail = syncing ? `${progress?.phase || "同步中"}${progress?.total ? ` ${progress.completed}/${progress.total}` : "…"}` : !source.enabled ? "已停用" : source.status === "healthy" ? `正常 · ${source.event_count} 项` : (source.detail || "未同步");
   const intervals = [[0, "手动"], [5, "5 分钟"], [15, "15 分钟"], [30, "30 分钟"], [60, "1 小时"], [360, "6 小时"], [1440, "每天"]];
-  const vpnMode = source.id === "judge" && source.network_mode === "webvpn";
+  if (!intervals.some(([value]) => value === interval)) intervals.push([interval, `${interval} 分钟`]);
   const needsVpnLogin = vpnMode && source.webvpn_login_required && state.school?.school_id && (!state.school.remember_password || source.status === "login_required");
-  const modeSelect = source.id === "judge" ? `<select class="source-mode" data-source-mode="judge" aria-label="JUDGE 作业访问模式" ${syncing ? "disabled" : ""}><option value="direct" ${!vpnMode ? "selected" : ""}>直连（校内）</option><option value="webvpn" ${vpnMode ? "selected" : ""}>学校 WebVPN</option></select>` : "";
   return `<div class="source-row active-source"><div class="source-name"><strong>${esc(source.label)}</strong>${modeSelect}</div><span class="source-detail" role="status">${esc(detail)}</span><span class="source-last-sync">${source.last_sync_at ? fmtDate(dateOf(source.last_sync_at), { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "未同步"}</span><select class="source-interval" data-source-interval="${source.id}" aria-label="${esc(source.label)}刷新间隔" ${syncing ? "disabled" : ""}>${intervals.map(([value, label]) => `<option value="${value}" ${interval === value ? "selected" : ""}>${label}</option>`).join("")}</select><button type="button" class="quiet-button source-sync-button" ${needsVpnLogin ? 'data-source-webvpn-login' : `data-source-sync="${source.id}"`} ${syncing || !source.enabled ? "disabled" : ""}><i class="bi ${needsVpnLogin ? "bi-shield-lock" : "bi-arrow-repeat"} ${syncing ? "is-spinning" : ""}"></i>${syncing ? "同步中" : needsVpnLogin ? "登录" : "同步"}</button><label class="switch" aria-label="启用${esc(source.label)}"><input type="checkbox" data-source-toggle="${source.id}" ${source.enabled ? "checked" : ""} ${syncing ? "disabled" : ""}><span></span></label></div>`;
 }
 
@@ -409,15 +417,17 @@ function renderConnections() {
   const statusText = !attached ? "未连接" : needsLogin ? (state.school.detail || "需要重新登录") : `${state.school.school_id} · ${state.school.remember_password ? "按来源自动刷新" : "仅当前会话"}`;
   $("#school-connection").innerHTML = `<div class="connection-main"><i class="bi ${needsLogin ? "bi-shield-exclamation" : "bi-shield-check"}"></i><div><strong>${attached ? esc(state.school.display_name || state.school.school_id) : "北航统一认证"}</strong><span>${esc(statusText)}</span></div></div><button class="${attached && !needsLogin ? "danger-button" : "primary-button"}" id="school-action">${attached && !needsLogin ? "断开" : needsLogin ? "重新连接" : "连接"}</button>`;
   $("#school-action").addEventListener("click", attached && !needsLogin ? disconnectSchool : openSchoolDialog);
-  $("#source-list").innerHTML = [...state.data.sources].sort((a, b) => Number(b.available !== false) - Number(a.available !== false)).map(renderSourceRow).join("");
+  $("#source-list").innerHTML = [...state.data.sources].sort((a, b) => Number(b.available !== false) - Number(a.available !== false)).map(source => renderSourceRow(source) + (source.id === "iclass" ? renderAttendanceDetails() : "")).join("");
   $$("[data-source-sync]").forEach((button) => button.addEventListener("click", () => syncSources(button, button.dataset.sourceSync)));
-  $$("[data-source-webvpn-login]").forEach((button) => button.addEventListener("click", () => openSchoolDialog("webvpn")));
+  $$("[data-source-webvpn-login]").forEach((button) => button.addEventListener("click", () => openSchoolDialog("webvpn", button.closest(".source-row").querySelector("[data-source-mode]").dataset.sourceMode)));
   $$("[data-source-mode]").forEach((select) => select.addEventListener("change", async () => {
     const selected = select.value; select.disabled = true;
     try {
-      await api("/api/sources/judge", {method:"PATCH", body:JSON.stringify({network_mode:selected})});
+      const sourceId = select.dataset.sourceMode;
+      await api(`/api/sources/${encodeURIComponent(sourceId)}`, {method:"PATCH", body:JSON.stringify({network_mode:selected})});
       await loadDashboard(); toast("访问模式已保存");
-      if (selected === "webvpn" && state.school?.school_id && !state.school.remember_password && state.data.sources.find(s => s.id === "judge")?.webvpn_login_required) await openSchoolDialog("webvpn");
+      const source = state.data.sources.find(s => s.id === sourceId);
+      if (selected === "webvpn" && source?.enabled && source.available !== false && state.school?.school_id && !state.school.remember_password && source.webvpn_login_required) await openSchoolDialog("webvpn", sourceId);
     } catch (e) { await loadDashboard(); toast(e.message || "保存失败"); }
   }));
   const syncing = state.data.sources.some((source) => source.syncing);
@@ -440,6 +450,8 @@ function renderChannels() {
 
 function renderPreferences() {
   const prefs = state.data.preferences || {};
+  const authForm = $("#auth-refresh-form");
+  if (!authForm.contains(document.activeElement)) authForm.elements.auth_refresh_hours.value = prefs.auth_refresh_hours ?? 24;
   $("#preferences-form [name=quiet_start]").value = prefs.quiet_start || "";
   $("#preferences-form [name=quiet_end]").value = prefs.quiet_end || "";
   const window = state.data.academic_window || {}, form = $("#academic-form");
@@ -514,13 +526,18 @@ async function syncSources(button, sourceId = null) {
   finally { selected.forEach((id) => state.syncPending.delete(id)); renderConnections(); }
 }
 
-async function openSchoolDialog(networkMode = "direct") {
+async function openSchoolDialog(networkMode = "direct", sourceId = "") {
   // Click listeners pass an Event; only the explicit string selects WebVPN.
   const mode = networkMode === "webvpn" ? "webvpn" : "direct";
   $("#school-form").reset(); $("#school-form [name=network_mode]").value = mode;
+  $("#school-form [name=source_id]").value = typeof sourceId === "string" ? sourceId : "";
   $("#school-dialog-title").textContent = mode === "webvpn" ? "登录学校 WebVPN" : "连接北航";
   $("#school-error").textContent = ""; $("#captcha-field").hidden = true; if (state.school?.school_id) $("#school-form [name=username]").value = state.school.school_id; $("#school-dialog").showModal();
   try { const result = await api(`/api/school/preload?network_mode=${mode}`, { method: "POST" }); if (result.captcha_required) { $("#captcha-field").hidden = false; $("#captcha-image").src = `/api/school/captcha/${encodeURIComponent(result.captcha_id)}?network_mode=${mode}&t=${Date.now()}`; } } catch (e) { $("#school-error").textContent = e.message; }
+}
+function renderAttendanceDetails() {
+  const rows = state.data.attendance_details || [];
+  return `<details class="attendance-details"><summary>签到记录${rows.length ? `（${rows.length}）` : ""}</summary>${rows.length ? rows.map(row => `<div class="attendance-record"><div><strong>${esc(row.title)}</strong><small>${esc(eventTimeRange(row))}${row.starts_at ? `　${fmtDate(dateOf(row.starts_at), {year:"numeric",month:"numeric",day:"numeric"})}` : ""}</small></div><span>${row.matched ? "" : "未匹配课表　"}${esc(({done:"已签到",missing:"未签到",unknown:"状态未知"})[row.status] || "状态未知")}</span></div>`).join("") : '<span class="muted">暂无签到记录</span>'}</details>`;
 }
 async function disconnectSchool() { if (!confirm("断开北航账号？已同步的日程会保留。")) return; await api("/api/school/disconnect", { method: "POST" }); await schoolStateReset(); toast("已断开"); }
 async function schoolStateReset() { const session = await api("/api/session"); state.school = session.school; await loadDashboard(); }
@@ -544,7 +561,7 @@ function profileDefaults(profile) {
   if (profile === "spoc-assignment-grade") return {};
   if (changeProfiles.has(profile)) return { completion_filter: "incomplete" };
   return ({
-    course: { before_start: 15 }, signin: { before_end: 30, repeat_every: 5, repeat_count: 6, completion_filter: "incomplete" },
+    course: { before_start: 15 }, signin: { check_times: [{anchor:"starts_at",offset_minutes:-10},{anchor:"ends_at",offset_minutes:-5}], excluded_courses: [] },
     library: { before_start: 30, before_expiry: 15 }, assignment: { days_before: 1, hours_before: 2, completion_filter: "incomplete", assignment_type: "" },
     exam: { days_before: 7, hours_before: 24, final_hours: 2 }, grade: { poll_interval: 15 },
     fitness: { check_weekday: 1, check_hour: 9 },
@@ -553,6 +570,8 @@ function profileDefaults(profile) {
   })[profile] || {};
 }
 function settingsFromRule(rule, profile) {
+  if (profile === "signin") return {...profileDefaults(profile), ...(rule?.profile_settings || {}),
+    check_times: rule?.profile_settings?.check_times || (rule?.triggers?.length ? rule.triggers : rule?.trigger ? [rule.trigger] : profileDefaults(profile).check_times)};
   if (deadlineProfiles.has(profile)) return {...profileDefaults(profile), ...(rule?.profile_settings || {}), reminder_times:deadlinePoints(rule)};
   if (profile === "course") {
     const saved = rule?.profile_settings || {}, trigger = (rule?.triggers?.length ? rule.triggers : [rule?.trigger]).filter(Boolean)[0];
@@ -572,7 +591,10 @@ function renderProfileSettings(profile, settings = profileDefaults(profile)) {
   if (profile === "course") html = `<label class="rule-field"><span>提醒时机</span><select data-profile-setting="timing"><option value="before_start" ${settings.timing === "before_start" ? "selected" : ""}>上课前</option><option value="before_end" ${settings.timing === "before_end" ? "selected" : ""}>课程结束前</option></select></label><div class="course-advance">${n("advance_minutes", "提前（分钟）", settings.advance_minutes)}</div>`;
   else if (profile === "course-change") html = `<div class="choice-grid change-type-grid">${Object.entries(courseChangeTypes).map(([value,label]) => `<label><input type="checkbox" data-change-type="${value}" ${(settings.change_types || []).includes(value) ? "checked" : ""}>${label}</label>`).join("")}</div>`;
   else if (changeProfiles.has(profile)) html = "";
-  else if (profile === "signin") html = `<div class="form-row three">${n("before_end", "结束前检测（分钟）", settings.before_end)}${n("repeat_every", "未签到每隔（分钟）", settings.repeat_every, 0)}${n("repeat_count", "最多提醒（次）", settings.repeat_count, 1, 20)}</div>`;
+  else if (profile === "signin") {
+    const names = [...new Set(state.data.events.filter(e => e.kind === "course").map(e => e.title)), ...(settings.excluded_courses || [])];
+    html = `<div id="check-time-list">${settings.check_times.map(checkTimeRow).join("")}</div><button type="button" class="inline-button" id="add-check-time"><i class="bi bi-plus"></i>添加检查时间</button><details class="course-exclusions"><summary>排除课程</summary>${[...new Set(names)].map(name => `<label class="check-row"><input type="checkbox" data-exclude-attendance-course="${esc(name)}" ${(settings.excluded_courses || []).includes(name) ? "checked" : ""}><span>${esc(name)}</span></label>`).join("") || '<span class="muted">暂无课程</span>'}</details>`;
+  }
   else if (profile === "library") html = `<div class="form-row">${n("before_start", "开始前（分钟）", settings.before_start)}${n("before_expiry", "离开失效前（分钟）", settings.before_expiry)}</div>`;
   else if (deadlineProfiles.has(profile)) html = `<div id="reminder-time-list">${settings.reminder_times.map(reminderTimeRow).join("")}</div><button type="button" class="inline-button" id="add-reminder-time"><i class="bi bi-plus"></i>添加提醒时间</button>`;
   else if (profile === "exam") html = `<div class="form-row three">${n("days_before", "首次（天前）", settings.days_before, 0, 365)}${n("hours_before", "再次（小时前）", settings.hours_before, 0, 720)}${n("final_hours", "最后（小时前）", settings.final_hours, 0, 72)}</div>`;
@@ -582,20 +604,29 @@ function renderProfileSettings(profile, settings = profileDefaults(profile)) {
   else if (profile === "boya-signout") html = `<div class="form-row three">${n("before_end", "签退结束前（分钟）", settings.before_end)}${n("repeat_every", "未签退每隔（分钟）", settings.repeat_every, 0)}${n("repeat_count", "最多提醒（次）", settings.repeat_count, 1, 20)}</div>`;
   else if (profile === "venue") html = `<div class="form-row">${n("before_start", "预约开始前（分钟）", settings.before_start)}${n("before_end", "预约结束前（分钟）", settings.before_end)}</div>`;
   else html = `<div class="form-row three"><label>日程类型<select data-profile-setting="kind"><option value="custom">个人日程</option><option value="course">课程</option><option value="assignment">作业</option><option value="exam">考试</option><option value="booking">预约</option></select></label><label>基准时间<select data-profile-setting="anchor"><option value="starts_at">开始</option><option value="ends_at">结束</option><option value="due_at">截止</option></select></label>${n("offset", "相隔（分钟）", settings.offset)}</div><div class="form-row"><label>方向<select data-profile-setting="direction"><option value="before">之前</option><option value="after">之后</option></select></label><label>限定来源<input data-profile-setting="source" value="${esc(settings.source || "")}" placeholder="留空表示全部"></label></div>`;
-  if (["signin", "assignment", "spoc-assignment", "judge-assignment", "spoc-new-assignment", "judge-new-assignment"].includes(profile)) {
+  if (["assignment", "spoc-assignment", "judge-assignment", "spoc-new-assignment", "judge-new-assignment"].includes(profile)) {
     const choices = profile === "signin" ? [["incomplete", "仅未签到"], ["completed", "仅已签到"], ["unknown", "仅状态未知"], ["any", "全部状态"]] : [["incomplete", "未完成"], ["unsubmitted", "仅未提交"], ["partial", "仅部分提交"], ["submitted", "仅已提交"], ["unknown", "仅状态未知"], ["any", "全部状态"]];
     html += `<label class="rule-field completion-field"><span>提醒状态</span><select data-profile-setting="completion_filter">${choices.map(([value, label]) => `<option value="${value}" ${(settings.completion_filter || "incomplete") === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>`;
   }
   $("#profile-settings").innerHTML = html;
   $("#rule-settings-fieldset").hidden = profile === "spoc-assignment-grade";
   Object.entries(settings).filter(([,value]) => !Array.isArray(value)).forEach(([key, value]) => { const input = $(`[data-profile-setting="${key}"]`); if (input) input.value = value; });
-  $("#rule-settings-title").textContent = profile === "course-change" ? "变更类别" : deadlineProfiles.has(profile) ? "截止前提醒" : changeProfiles.has(profile) ? "检测设置" : "提醒时间";
+  $("#rule-settings-title").textContent = profile === "course-change" ? "变更类别" : profile === "signin" ? "检查时间" : deadlineProfiles.has(profile) ? "截止前提醒" : changeProfiles.has(profile) ? "检测设置" : "提醒时间";
 }
 function reminderTimeRow(point) {
   return `<div class="reminder-time-row"><span>截止前</span>${[["days","天",365],["hours","小时",23],["minutes","分钟",59]].map(([key,label,max]) => `<label><input type="number" data-advance="${key}" min="0" max="${max}" step="1" value="${esc(point[key] || 0)}" aria-label="提前${label}" required><span>${label}</span></label>`).join("")}<button type="button" class="icon-button" data-remove-reminder-time aria-label="删除提醒时间"><i class="bi bi-x"></i></button></div>`;
 }
+function checkTimeText(point) { return `${point.anchor === "ends_at" ? "结束" : "开始"}${point.offset_minutes === 0 ? "时" : `${point.offset_minutes < 0 ? "前" : "后"} ${Math.abs(point.offset_minutes)} 分钟`}`; }
+function checkTimeRow(point) {
+  const timing = point.anchor === "ends_at" ? (point.offset_minutes === 0 ? "at_end" : "before_end") : point.offset_minutes < 0 ? "before_start" : "after_start";
+  return `<div class="check-time-row"><select data-check-timing aria-label="检查基准">${[["before_start","开始前"],["after_start","开始后"],["before_end","结束前"],["at_end","课程结束时"]].map(([value,label]) => `<option value="${value}" ${timing === value ? "selected" : ""}>${label}</option>`).join("")}</select><label><input data-check-minutes type="number" min="0" max="${timing === "before_start" ? 10 : 1440}" step="1" value="${Math.abs(point.offset_minutes)}" ${timing === "at_end" ? "disabled" : "required"} aria-label="相隔分钟"><span>分钟</span></label><button type="button" class="icon-button" data-remove-check-time aria-label="删除检查时间"><i class="bi bi-x"></i></button></div>`;
+}
+function checkTimePoint(timing, minutes) {
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 1440 || timing === "before_start" && minutes > 10) throw new Error("开始前最多 10 分钟；分钟数必须为非负整数");
+  return {anchor: ["at_end", "before_end"].includes(timing) ? "ends_at" : "starts_at", offset_minutes: timing === "at_end" ? 0 : timing === "after_start" ? minutes : -minutes};
+}
 function openRuleDialog(rule = null) {
-  if (rule?.available === false) { toast("Coming Soon"); return; }
+  if (rule?.available === false && rule.availability !== "needs_configuration") { toast("Coming Soon"); return; }
   const form = $("#rule-form"); form.reset(); $("#action-list").innerHTML = ""; $("#rule-error").textContent = "";
   const editing = rule && Number.isInteger(rule.id); form.elements.rule_id.value = editing ? rule.id : ""; form.elements.rule_enabled.value = editing ? String(rule.enabled) : "true"; $("#rule-dialog-title").textContent = editing ? "编辑提醒规则" : "新建提醒规则"; $("#delete-rule-button").hidden = !editing;
   const profile = rule ? inferRuleProfile(rule) : "spoc-assignment";
@@ -606,7 +637,7 @@ function openRuleDialog(rule = null) {
     actions.forEach(addActionRow); form.elements.quiet_policy.value = rule.quiet_hours_policy || "delay";
   } else { form.elements.name.value = reminderProfiles[profile].name; addActionRow(); }
   renderProfileSettings(profile, settingsFromRule(rule, profile));
-  if (!$("#action-list").children.length) addActionRow(); $("#rule-dialog").showModal();
+  if (!$("#action-list").children.length) addActionRow(); $("#rule-dialog").showModal(); $(".rule-editor-body").scrollTop = 0;
 }
 function rulePayload(form) {
   const profile = form.elements.profile.value; const settings = {};
@@ -624,7 +655,14 @@ function rulePayload(form) {
       if (!settings.change_types.length) throw new Error("至少选择一种课程变更类别");
     }
   }
-  else if (profile === "signin") { scope = { kinds: ["signin"], sources: ["iclass"] }; triggers = [{ anchor: "ends_at", offset_minutes: -settings.before_end }]; conditions = []; cancel_conditions = []; repeat = { every_minutes: settings.repeat_every || null, max_count: settings.repeat_every ? settings.repeat_count : 1, until_anchor: "ends_at" }; }
+  else if (profile === "signin") {
+    scope = { kinds: ["signin"], sources: ["iclass"] };
+    settings.check_times = $$(".check-time-row").map(row => checkTimePoint(row.querySelector("[data-check-timing]").value, Number(row.querySelector("[data-check-minutes]").value)));
+    if (!settings.check_times.length || settings.check_times.length > 10) throw new Error("请设置 1–10 个检查点");
+    if (new Set(settings.check_times.map(p => `${p.anchor}:${p.offset_minutes}`)).size !== settings.check_times.length) throw new Error("检查点不能重复");
+    settings.excluded_courses = $$("[data-exclude-attendance-course]:checked").map(input => input.dataset.excludeAttendanceCourse);
+    triggers = settings.check_times;
+  }
   else if (profile === "library") { scope = { kinds: ["booking"], sources: ["libbook"] }; triggers = [{ anchor: "starts_at", offset_minutes: -settings.before_start }, { anchor: "ends_at", offset_minutes: -settings.before_expiry }]; conditions = [{ field: "status", op: "ne", value: "done" }]; cancel_conditions = [{ field: "status", op: "eq", value: "done" }]; }
   else if (deadlineProfiles.has(profile)) {
     settings.reminder_times = $$(".reminder-time-row").map(row => Object.fromEntries(["days","hours","minutes"].map(key => [key,Number(row.querySelector(`[data-advance="${key}"]`).value)])));
@@ -660,6 +698,14 @@ function bindEvents() {
   $("#task-type").addEventListener("change", (event) => { state.taskType = event.target.value; renderTasks(); });
   $("#task-history").addEventListener("change", (event) => { state.taskHistory = event.target.checked; renderTasks(); });
   $("#show-completed").addEventListener("change", (event) => { state.showCompleted = event.target.checked; renderToday(); renderCalendar(); });
+  $("#auth-refresh-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const hours = Number(event.currentTarget.elements.auth_refresh_hours.value);
+    try {
+      await api("/api/preferences", { method: "PUT", body: JSON.stringify({ auth_refresh_hours: hours }) });
+      await loadDashboard(); toast("认证刷新间隔已保存");
+    } catch (error) { toast(error.message); }
+  });
   $("#academic-form [name=academic_mode]").addEventListener("change", updateAcademicControls);
   $("#academic-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -688,12 +734,27 @@ function bindEvents() {
   $("#rule-connection").addEventListener("change", (event) => { renderRuleTypes(event.currentTarget.value); const profile = $("#rule-profile").value; renderProfileSettings(profile); $("#rule-form [name=name]").value = reminderProfiles[profile].name; });
   $("#rule-profile").addEventListener("change", (event) => { const profile = event.currentTarget.value; renderProfileSettings(profile); $("#rule-form [name=name]").value = reminderProfiles[profile].name; });
   $("#profile-settings").addEventListener("click", event => {
+    if (event.target.closest("#add-check-time")) {
+      if ($$(".check-time-row").length >= 10) { toast("最多 10 个检查时间"); return; }
+      $("#check-time-list").insertAdjacentHTML("beforeend", checkTimeRow({anchor:"starts_at",offset_minutes:15}));
+    }
+    const removeCheck = event.target.closest("[data-remove-check-time]");
+    if (removeCheck) { if ($$(".check-time-row").length > 1) removeCheck.closest(".check-time-row").remove(); else toast("至少保留一个检查时间"); }
     if (event.target.closest("#add-reminder-time")) {
       if ($$(".reminder-time-row").length >= 10) { toast("最多 10 个时间点"); return; }
       $("#reminder-time-list").insertAdjacentHTML("beforeend", reminderTimeRow({days:0,hours:0,minutes:30}));
     }
     const remove = event.target.closest("[data-remove-reminder-time]");
     if (remove) { if ($$(".reminder-time-row").length > 1) remove.closest(".reminder-time-row").remove(); else toast("至少保留一个提醒时间"); }
+  });
+  $("#profile-settings").addEventListener("change", event => {
+    if (!event.target.matches("[data-check-timing]")) return;
+    const minutes = event.target.closest(".check-time-row").querySelector("[data-check-minutes]"), timing = event.target.value;
+    minutes.disabled = timing === "at_end";
+    minutes.required = !minutes.disabled;
+    minutes.max = timing === "before_start" ? "10" : "1440";
+    if (minutes.disabled) minutes.value = "0";
+    else if (Number(minutes.value) > Number(minutes.max)) minutes.value = minutes.max;
   });
   $("#rule-form").addEventListener("submit", async (event) => { event.preventDefault(); const formElement = event.currentTarget; const id = formElement.elements.rule_id.value; try { const payload = rulePayload(formElement); await api(id ? `/api/rules/${id}` : "/api/rules", { method: id ? "PUT" : "POST", body: JSON.stringify(payload) }); if (payload.profile === "grade" && state.data.sources.some((source) => source.id === "grade")) await api("/api/sources/grade", { method: "PATCH", body: JSON.stringify({ refresh_interval_minutes: Number(payload.profile_settings.poll_interval) }) }); $("#rule-dialog").close(); await loadDashboard(); toast("规则已保存"); } catch (e) { $("#rule-error").textContent = e.message; } });
   $("#delete-rule-button").addEventListener("click", async () => { const id = $("#rule-form").elements.rule_id.value; if (!id || !confirm("删除这条提醒规则？未发送的计划也会取消。")) return; await api(`/api/rules/${id}`, { method: "DELETE" }); $("#rule-dialog").close(); await loadDashboard(); toast("规则已删除"); });

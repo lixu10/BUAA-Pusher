@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from app.upstream.sso import AuthenticationRequired, BuaaSsoSession
+from app.upstream.webvpn import from_webvpn_url, resolve_upstream_redirect
 
 from .base import ConnectorManifest, SourceAdapter
 
@@ -154,7 +155,7 @@ class SpocAdapter(SourceAdapter):
     async def _get_object(self, url: str, params: dict[str, str]) -> dict[str, Any] | None:
         response = await self.session.client.get(url, params=params, headers={
             "X-Requested-With": "XMLHttpRequest", "Token": f"Inco-{self.token}", "RoleCode": self.role_code})
-        if response.status_code == 401 or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code == 401 or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired("SPOC 会话已失效")
         response.raise_for_status()
         payload = response.json()
@@ -188,7 +189,7 @@ class SpocAdapter(SourceAdapter):
             token = self.extract_token(str(response.url)) or ""
             location = response.headers.get("location")
             if not token and location:
-                current = urljoin(str(response.url), location)
+                current = resolve_upstream_redirect(str(response.url), location)
                 token = self.extract_token(current) or ""
             if token:
                 break
@@ -210,7 +211,7 @@ class SpocAdapter(SourceAdapter):
                 raise AuthenticationRequired("SPOC 角色未初始化")
             headers["RoleCode"] = self.role_code
         response = await self.session.client.post(url, json=body, headers=headers)
-        if response.status_code == 401 or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code == 401 or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired("SPOC 会话已失效")
         if response.status_code != 200:
             raise RuntimeError(f"SPOC 返回 {response.status_code}")
@@ -242,7 +243,7 @@ class SpocAdapter(SourceAdapter):
                 "RoleCode": self.role_code,
             },
         )
-        if response.status_code == 401 or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code == 401 or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired("SPOC 会话已失效")
         if response.status_code != 200:
             raise RuntimeError(f"SPOC 返回 {response.status_code}")

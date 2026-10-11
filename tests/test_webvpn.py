@@ -350,8 +350,10 @@ class WebVpnSettingsApiTest(unittest.TestCase):
 
     def test_rejects_invalid_or_other_source_modes(self):
         self.assertEqual(422, self.client.patch("/api/sources/judge", json={"network_mode":"proxy"}).status_code)
-        self.assertEqual(422, self.client.patch("/api/sources/spoc", json={"network_mode":"webvpn"}).status_code)
-        self.assertEqual(403, self.client.patch("/api/sources/iclass", json={"network_mode":"webvpn"}).status_code)
+        for source in ("spoc", "byxt", "iclass", "grade", "bykc", "cgyy", "ygdk", "libbook"):
+            self.assertEqual(200, self.client.patch(f"/api/sources/{source}", json={"network_mode":"webvpn"}).status_code)
+            self.assertEqual("webvpn", self.db.get_source(self.user["id"], source)["network_mode"])
+        self.assertFalse(self.db.get_source(self.user["id"], "iclass")["enabled"])
 
     def test_mode_change_is_blocked_during_sync(self):
         job = Mock(); job.done.return_value = False

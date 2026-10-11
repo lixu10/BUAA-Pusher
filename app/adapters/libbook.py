@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urljoin, urlparse
 import httpx
 
 from app.upstream.sso import AuthenticationRequired, BuaaSsoSession
+from app.upstream.webvpn import WebVpnClient, from_webvpn_url, resolve_upstream_redirect
 
 from .base import ConnectorManifest, SourceAdapter
 
@@ -48,10 +49,13 @@ class LibBookAdapter(SourceAdapter):
         # The library host currently serves an incomplete certificate chain on
         # some Windows installations.  Keep SSO verification strict and scope
         # the compatibility client to booking.lib.buaa.edu.cn only.
-        async with httpx.AsyncClient(
+        business_client = WebVpnClient() if self.session.network_mode == "webvpn" else httpx.AsyncClient(
             follow_redirects=False, timeout=20, trust_env=False, verify=False,
             headers={"User-Agent": "Mozilla/5.0 PUAA-Reminder/0.1"},
-        ) as library_client:
+        )
+        if self.session.network_mode == "webvpn":
+            business_client.cookies.update(self.session.client.cookies)
+        async with business_client as library_client:
             self.library_client = library_client
             cas = await self._cas_token()
             login = await self._post(USER_LOGIN_URL, {"cas": cas}, authorize=False)
@@ -85,12 +89,12 @@ class LibBookAdapter(SourceAdapter):
             found = self.extract_cas(str(response.url))
             location = response.headers.get("location")
             if not found and location:
-                current = urljoin(str(response.url), location)
+                current = resolve_upstream_redirect(str(response.url), location)
                 found = self.extract_cas(current)
             if found:
                 return found
             if not location:
-                if response.status_code in {401, 403} or "sso.buaa.edu.cn" in str(response.url):
+                if response.status_code in {401, 403} or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
                     raise AuthenticationRequired("图书馆授权未完成")
                 break
         raise AuthenticationRequired("未能从图书馆登录链获取 CAS 参数")
@@ -106,7 +110,7 @@ class LibBookAdapter(SourceAdapter):
         if self.library_client is None:
             raise RuntimeError("图书馆连接尚未初始化")
         response = await self.library_client.post(url, json=body, headers=headers)
-        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired("图书馆会话已失效")
         if response.status_code != 200:
             raise RuntimeError(f"图书馆接口返回 {response.status_code}")

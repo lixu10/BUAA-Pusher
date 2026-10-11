@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.upstream.sso import AuthenticationRequired, BuaaSsoSession
+from app.upstream.webvpn import from_webvpn_url
 
 from .base import ConnectorManifest, SourceAdapter
 from .byxt import ByxtAdapter
@@ -74,7 +75,7 @@ class GradeAdapter(SourceAdapter):
 
     @staticmethod
     def _ensure_response(response: Any) -> None:
-        url, body = str(response.url), response.text.lstrip()
+        url, body = from_webvpn_url(str(response.url)), response.text.lstrip()
         if response.status_code == 401 or "sso.buaa.edu.cn" in url or "name=\"execution\"" in response.text:
             raise AuthenticationRequired("成绩系统授权未完成")
         if response.status_code != 200:

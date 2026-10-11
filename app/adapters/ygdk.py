@@ -5,6 +5,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
 
 from app.upstream.sso import AuthenticationRequired, BuaaSsoSession
+from app.upstream.webvpn import from_webvpn_url, resolve_upstream_redirect
 
 from .base import ConnectorManifest, SourceAdapter
 from .byxt import ByxtAdapter
@@ -85,12 +86,12 @@ class YgdkAdapter(SourceAdapter):
             code = self.extract_code(str(response.url))
             location = response.headers.get("location")
             if not code and location:
-                current = urljoin(str(response.url), location)
+                current = resolve_upstream_redirect(str(response.url), location)
                 code = self.extract_code(current)
             if code:
                 break
             if not location:
-                if response.status_code == 401 or "sso.buaa.edu.cn" in str(response.url):
+                if response.status_code == 401 or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
                     raise AuthenticationRequired("阳光体育授权未完成")
                 break
         if not code:
@@ -116,7 +117,7 @@ class YgdkAdapter(SourceAdapter):
 
     @staticmethod
     def _unwrap(response: Any, label: str) -> dict[str, Any]:
-        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code in {401, 403} or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired(f"{label}授权已失效")
         if response.status_code != 200:
             raise RuntimeError(f"{label}返回 {response.status_code}")

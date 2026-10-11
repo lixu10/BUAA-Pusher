@@ -1,5 +1,14 @@
 # 北航 API 调研记录
 
+## 2026-10-09 全连接 WebVPN 与只读签到恢复
+
+- 重新阅读 UBAA 当前 [SigninClient](https://github.com/BUAASubnet/UBAA/blob/main/server/src/main/kotlin/cn/edu/ubaa/signin/SigninClient.kt)、[Signin DTO](https://github.com/BUAASubnet/UBAA/blob/main/shared/src/commonMain/kotlin/cn/edu/ubaa/model/dto/Signin.kt) 和 [LocalSigninApi](https://github.com/BUAASubnet/UBAA/blob/main/shared/src/commonMain/kotlin/cn/edu/ubaa/api/local/LocalSigninApi.kt)：8346 授权跳转提取 loginName；8347 GET 登录换取 sessionId，GET `get_stu_course_sched.action` 按日期读取状态。`signStatus=0` 未签到、`1` 已签到，其他值未知。只采用只读部分，不接入 UBAA 服务，不实现扫码、定位、签到提交或服务器时间请求。
+- 所有学校连接按用户保存独立 direct/webvpn 模式，扩展固定学校域名与 iClass 8346/8347 端口；Coming Soon 仍不能启用。Gateway 每次跳转验证目标，iClass 只允许授权/登录/查询路径，拒绝写路径和跨目标重放 POST，业务 token/sessionId 不跟随到其他域。支持保留 Location、正确还原相对路径、SPOC token 与教务 CAS 验证。
+- 教务课表是唯一日历来源，以课名和准确起止时间唯一匹配签到记录，歧义不猜测；普通教务课程不标为未签到。匹配结果附在同一课次，未匹配记录只在连接详情展示。
+- 签到默认停用，旧规则待重新配置。连接页支持独立自动同步间隔（0为仅手动），与提醒检查点分别设置。独立规则支持 1–10 个分钟级检查点和排除课程；到点先看已同步已签到缓存，否则查询；已签到取消该课次当前规则后续检查。多渠道和发送重试复用持久化检查结果，失败/未知/无匹配不发未签到提醒。页面和规则保存不调用学校接口。
+- 再次核对 UBAA 当前查询实现：非成功 STATUS 重新登录重试后返回空列表；这不足以证明学校确实无课程。本程序保留失败状态，新增脱敏的查询日期、STATUS、列表数量、是否有错误字段诊断，不记录账号、token、sessionId 或完整响应，避免把失败当成“未签到”。
+- 已做隔离测试和页面验证；真实账号只读同步由用户验收，未代用户签到或修改学校状态。下文较早的 Coming Soon 范围记录为历史，当前范围以本节为准。
+
 ## 2026-10-08 JUDGE 学校 WebVPN
 
 - 校方 CAS 可能将 `d.buaa.edu.cn` 自回调再次包入加密代理路径。需要识别并还原为原生 HTTPS 网关地址，保留回调参数；嵌套回调每层仍校验目标，禁止借此绕过主机白名单或 TLS 校验。错误原因仅显示主机/编码/端口类型，不输出完整地址、票据或 Cookie。
@@ -93,7 +102,7 @@ UBAA 支持本地直连、WebVPN 和服务端中继。本项目只把其源码�
 
 ### 其他校方系统
 
-- iClass：先从 SSO 跳转解析 `loginName`，再由 `iclass.buaa.edu.cn:8347/app/user/login.action` 换取 `sessionId`，课程读取为 `app/course/get_stu_course_sched.action`；业务域使用与 UBAA 一致的独立兼容客户端。按 UBAA 行为，无错误信息的 `STATUS=2` 空列表表示当天无可用签到课程，不应直接判为会话失效。当前连接停用。来源：[SigninClient](https://github.com/BUAASubnet/UBAA/blob/main/server/src/main/kotlin/cn/edu/ubaa/signin/SigninClient.kt) 与 [SigninLoginNameSupport](https://github.com/BUAASubnet/UBAA/blob/main/shared/src/commonMain/kotlin/cn/edu/ubaa/api/SigninLoginNameSupport.kt)。
+- iClass：先从 SSO 跳转解析 `loginName`，再由 `iclass.buaa.edu.cn:8347/app/user/login.action` 换取 `sessionId`，课程读取为 `app/course/get_stu_course_sched.action`。2026-10-09 再次核验：UBAA 在非成功 STATUS 下重试后返回空列表，并不能据此断言 `STATUS=2` 就表示无课。这里保留诊断和未知状态，不把查询失败判断成未签到。当前恢复为可配置自动同步的独立只读连接，启用状态由用户控制。来源：[SigninClient](https://github.com/BUAASubnet/UBAA/blob/main/server/src/main/kotlin/cn/edu/ubaa/signin/SigninClient.kt) 与 [SigninLoginNameSupport](https://github.com/BUAASubnet/UBAA/blob/main/shared/src/commonMain/kotlin/cn/edu/ubaa/api/SigninLoginNameSupport.kt)。
 - SPOC：从 `spocnewht/cas` 重定向提取 token，再调用 `spocnewht/sys/casLogin` 获取角色；`queryOne` 返回的 `mrxq` 才是作业查询代码，`dqxq` 只是学期显示名称。使用 `dqxq` 可能成功返回空列表，应使用接口实际给出的 `mrxq`。作业列表为 `inco/ht/queryListByPage`，课程名通过 `jxkj/queryKclb` 补全。来源：[LocalSpocApi](https://github.com/BUAASubnet/UBAA/blob/main/shared/src/commonMain/kotlin/cn/edu/ubaa/api/local/LocalSpocApi.kt)。
 - JUDGE：CAS service 指向 `judge.buaa.edu.cn`，业务页面为 `courselist.jsp` 与 `assignment/index.jsp`，返回 HTML 而非稳定 JSON。来源：[JudgeClient](https://github.com/BUAASubnet/UBAA/blob/main/server/src/main/kotlin/cn/edu/ubaa/judge/JudgeClient.kt)。
 - 图书馆：`booking.lib.buaa.edu.cn/v4/login/cas` 完成 CAS 交换，后续 `/v4/*` 请求使用独立 bearer token。当前 H5 回调把 `cas` 放在 URL fragment 中，`login/user` 的 `member` 也可能返回列表；连接器已兼容这两种真实结构。图书馆域当前证书链在部分 Windows 环境不完整，因此只对该业务域使用兼容 TLS 客户端，SSO 校验仍保持严格。来源：[LibBookClient](https://github.com/BUAASubnet/UBAA/blob/main/server/src/main/kotlin/cn/edu/ubaa/libbook/LibBookClient.kt)。

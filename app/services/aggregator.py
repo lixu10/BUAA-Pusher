@@ -12,16 +12,18 @@ from app.services.sync_changes import SyncChangeTracker
 
 
 class Aggregator:
-    def __init__(self, db: Database, user_id: int, adapters: list[SourceAdapter]):
+    def __init__(self, db: Database, user_id: int, adapters: list[SourceAdapter], read_events=None):
         self.db = db
         self.user_id = user_id
         self.adapters = adapters
+        self.read_events = read_events
 
     async def sync(self) -> dict[str, int]:
         result: dict[str, int] = {}
         for adapter in self.adapters:
             try:
-                events = await asyncio.wait_for(adapter.sync(), timeout=180)
+                read = self.read_events(adapter) if self.read_events else adapter.sync()
+                events = await asyncio.wait_for(read, timeout=180)
                 previous_source = self.db.get_source(self.user_id, adapter.id)
                 source_has_baseline = previous_source is not None and previous_source.get("status") in {"healthy", "degraded"}
                 for event in events:

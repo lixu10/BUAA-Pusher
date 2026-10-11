@@ -6,6 +6,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from app.upstream.sso import AuthenticationRequired, BuaaSsoSession
+from app.upstream.webvpn import from_webvpn_url
 
 from .base import ConnectorManifest, SourceAdapter
 
@@ -58,10 +59,10 @@ class ByxtAdapter(SourceAdapter):
         # BYXT has its own CAS service session. Exchange the existing SSO TGC for
         # a BYXT ticket first (buaa-api), then probe currentUser.do (UBAA).
         exchange = await self.session.client.get(SSO_LOGIN, params={"service": PORTAL_VERIFY})
-        if not str(exchange.url).startswith(PORTAL_VERIFY):
+        if not from_webvpn_url(str(exchange.url)).startswith(PORTAL_VERIFY):
             raise AuthenticationRequired("本科教务 CAS 授权失败")
         response = await self.session.client.get(CURRENT_USER)
-        if response.status_code == 401 or "sso.buaa.edu.cn" in str(response.url):
+        if response.status_code == 401 or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)):
             raise AuthenticationRequired("本科教务授权未完成")
         if response.status_code != 200:
             raise RuntimeError(f"本科教务入口返回 {response.status_code}")
@@ -76,7 +77,7 @@ class ByxtAdapter(SourceAdapter):
             "Referer": f"{BASE}/index.html",
         }
         response = await self.session.client.request(method, f"{BASE}/{path.lstrip('/')}", headers=headers, **kwargs)
-        if response.status_code == 401 or "sso.buaa.edu.cn" in str(response.url) or "name=\"execution\"" in response.text:
+        if response.status_code == 401 or "sso.buaa.edu.cn" in from_webvpn_url(str(response.url)) or "name=\"execution\"" in response.text:
             self.session.user = None
             raise AuthenticationRequired("教务会话已过期")
         response.raise_for_status()

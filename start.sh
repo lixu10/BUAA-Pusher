@@ -12,3 +12,4 @@ fi
 
 .venv/bin/python -m pip install -r requirements.txt
 exec .venv/bin/python -m app
+

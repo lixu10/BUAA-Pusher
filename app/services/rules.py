@@ -9,6 +9,7 @@ from app.features import CHANGE_PROFILES, event_available, rule_available
 from app.services.sync_changes import change_matches
 from app.services.event_state import reminder_matches
 from app.services.academic import academic_window, in_academic_window
+from app.services.attendance import plan_checks
 
 
 class RuleEngine:
@@ -22,17 +23,25 @@ class RuleEngine:
         now = now or datetime.now(UTC)
         inserted = 0
         events = self.db.list_events(user_id, limit=5000)
+        attendance_courses = list(events)
         if self.enforce_feature_scope:
             window = academic_window(self.db.preferences(user_id), now)
             events = [event for event in events if event_available(event)
                       and in_academic_window(event, window)
                       and (self.db.get_source(user_id, event["source"]) or {}).get("enabled", True)]
+            attendance_courses = [e for e in attendance_courses if in_academic_window(e, window)]
         for rule in self.db.list_automation_rules(user_id):
             if self.enforce_feature_scope and not rule_available(rule):
                 self.db.cancel_rule_triggers(user_id, rule["id"], "Coming Soon")
                 continue
             if not rule["enabled"]:
                 self.db.cancel_rule_triggers(user_id, rule["id"], "规则已停用")
+                continue
+            if rule.get("profile") == "signin":
+                if not (self.db.get_source(user_id, "iclass") or {}).get("enabled", False):
+                    self.db.cancel_rule_triggers(user_id, rule["id"], "签到连接已停用")
+                    continue
+                inserted += plan_checks(self.db, user_id, rule, attendance_courses, now)
                 continue
             if rule.get("profile") in CHANGE_PROFILES:
                 # Change triggers have their own durable queue, so removal of a
