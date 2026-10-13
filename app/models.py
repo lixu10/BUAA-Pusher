@@ -7,7 +7,7 @@ import re
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.features import CHANGE_PROFILES
+from app.features import CHANGE_PROFILES, CATALOG_PROFILES
 
 
 class RegisterRequest(BaseModel):
@@ -60,6 +60,10 @@ class SourceUpdate(BaseModel):
     enabled: bool | None = None
     refresh_interval_minutes: int | None = Field(default=None, ge=0, le=1440)
     network_mode: Literal["direct", "webvpn"] | None = None
+
+
+class BoyaCatalogUpdate(BaseModel):
+    refresh_interval_minutes: int = Field(ge=0, le=1440, strict=True)
 
 
 class EventIgnoreUpdate(BaseModel):
@@ -118,6 +122,32 @@ class AutomationRuleCreate(BaseModel):
 
     @model_validator(mode="after")
     def requires_trigger(self):
+        if self.profile in CATALOG_PROFILES:
+            for field in ("categories", "campuses", "sign_types", "keywords", "exclude_keywords", "course_ids"):
+                values = self.profile_settings.get(field, [])
+                if not isinstance(values, list) or len(values) > 100 or any(not isinstance(value, str) or not 1 <= len(value) <= 120 for value in values):
+                    raise ValueError("博雅筛选项应为最多100个短文本")
+                self.profile_settings[field] = list(dict.fromkeys(value.strip() for value in values if value.strip()))
+            if any(value not in {"1", "2"} for value in self.profile_settings["sign_types"]):
+                raise ValueError("签到类型仅支持仅签到、签到＋签退")
+            for key, default, minimum, maximum in [("min_remaining", 1, 1, 10000), ("cooldown_minutes", 15, 0, 1440)]:
+                value = self.profile_settings.get(key, default)
+                if type(value) is not int or not minimum <= value <= maximum:
+                    raise ValueError("名额阈值或通知间隔无效")
+                self.profile_settings[key] = value
+            preview = self.profile_settings.get("include_preview", True)
+            if type(preview) is not bool:
+                raise ValueError("未开放课程设置无效")
+            if self.profile in {"boya-enrollment-soon", "boya-enrollment-closing"}:
+                values = self.profile_settings.get("advance_minutes", [10, 1])
+                if not isinstance(values, list) or not 1 <= len(values) <= 10 or any(type(v) is not int or not 1 <= v <= 10080 for v in values) or len(set(values)) != len(values):
+                    raise ValueError("设置1–10个不重复的提前分钟数，至少1分钟")
+                self.profile_settings["advance_minutes"] = values
+            if any(action.after_minutes for action in self.actions):
+                raise ValueError("博雅抢课提醒通过时间点配置，不使用延后动作")
+            self.scope = RuleScope(sources=["bykc"], kinds=["boya_catalog"])
+            self.trigger, self.triggers, self.repeat = None, [], RuleRepeat()
+            return self
         if self.profile == "signin":
             points = self.profile_settings.get("check_times")
             if not isinstance(points, list) or not 1 <= len(points) <= 10:
@@ -144,7 +174,7 @@ class AutomationRuleCreate(BaseModel):
             self.conditions, self.cancel_conditions = [], []
             self.profile_settings["completion_filter"] = "incomplete"
             return self
-        if self.profile == "course" and "advance_minutes" in self.profile_settings:
+        if self.profile in {"course", "boya-course"} and "advance_minutes" in self.profile_settings:
             timing = self.profile_settings.get("timing", "before_start")
             minutes = self.profile_settings["advance_minutes"]
             if timing not in {"before_start", "before_end"} or type(minutes) is not int or not 0 <= minutes <= 10080:
@@ -156,7 +186,7 @@ class AutomationRuleCreate(BaseModel):
             self.trigger = None
             self.triggers = []
             self.repeat = RuleRepeat()
-            if self.profile == "course-change":
+            if self.profile in {"course-change", "boya-course-change"}:
                 categories = self.profile_settings.get("change_types", [])
                 if not isinstance(categories, list) or not categories or any(
                     not isinstance(value, str) or value not in {"time", "location", "teacher", "title", "added", "cancelled"}
@@ -236,6 +266,13 @@ class PreferencesUpdate(BaseModel):
     academic_filter_enabled: bool = True
     academic_start_date: date | None = None
     academic_end_date: date | None = None
+    task_visible_kinds: list[Literal["assignment", "course", "boya"]] = Field(default_factory=lambda: ["assignment"], max_length=3)
+    task_visible_sources: list[Literal["spoc", "judge", "byxt", "bykc"]] = Field(default_factory=lambda: ["spoc", "judge", "byxt", "bykc"], max_length=4)
+
+    @field_validator("task_visible_kinds", "task_visible_sources")
+    @classmethod
+    def unique_task_choices(cls, value):
+        return list(dict.fromkeys(value))
 
     @model_validator(mode="after")
     def academic_dates(self):

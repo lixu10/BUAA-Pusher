@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.db import Database
-from app.features import CHANGE_PROFILES, event_available, rule_available
+from app.features import CHANGE_PROFILES, CATALOG_TIMED_PROFILES, event_available, rule_available
 from app.services.sync_changes import change_matches
 from app.services.event_state import reminder_matches
 from app.services.academic import academic_window, in_academic_window
@@ -37,6 +37,13 @@ class RuleEngine:
             if not rule["enabled"]:
                 self.db.cancel_rule_triggers(user_id, rule["id"], "规则已停用")
                 continue
+            if rule.get("profile") in CATALOG_TIMED_PROFILES:
+                from app.services.boya import plan_catalog
+                if self.enforce_feature_scope and not (self.db.get_source(user_id, "bykc") or {}).get("enabled", False):
+                    self.db.cancel_rule_triggers(user_id, rule["id"], "博雅连接已停用")
+                    continue
+                inserted += plan_catalog(self.db, user_id, rule, now, window if self.enforce_feature_scope else None)
+                continue
             if rule.get("profile") == "signin":
                 if not (self.db.get_source(user_id, "iclass") or {}).get("enabled", False):
                     self.db.cancel_rule_triggers(user_id, rule["id"], "签到连接已停用")
@@ -52,7 +59,7 @@ class RuleEngine:
                         continue
                     payload = change["payload"]
                     event = payload["event"]
-                    current = self.db.event_by_key(user_id, event["source"], event["external_id"])
+                    current = self.db.boya_course(user_id, event["metadata"]["course_id"]) if event.get("kind") == "boya_catalog" else self.db.event_by_key(user_id, event["source"], event["external_id"])
                     event = {**event, "ignored": (current or event).get("ignored", False)}
                     if not self.matches_scope(rule["scope"], event) or not change_matches(rule, payload, event):
                         continue

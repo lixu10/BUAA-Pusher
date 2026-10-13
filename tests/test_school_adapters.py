@@ -33,9 +33,9 @@ class SchoolAdapterParserTest(unittest.TestCase):
                 "courseSignConfig": '{"signStartDate":"2030-09-19 13:45:00","signEndDate":"2030-09-19 14:10:00","signOutStartDate":"2030-09-19 15:50:00","signOutEndDate":"2030-09-19 16:10:00"}',
             },
         })
-        self.assertEqual(["boya", "signin", "signout"], [event["kind"] for event in events])
-        self.assertEqual("missing", events[1]["status"])
-        self.assertEqual("missing", events[2]["status"])
+        self.assertEqual(["boya"], [event["kind"] for event in events])
+        self.assertTrue(events[0]["metadata"]["sign_windows"]["signStartDate"].startswith("2030-09-19"))
+        self.assertEqual(0, events[0]["metadata"]["checkin"])
 
     def test_cgyy_signer_and_order_mapping(self):
         timestamp = 1710000000000

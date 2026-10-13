@@ -4,7 +4,7 @@ from typing import Any
 
 
 def completion_state(event: dict[str, Any]) -> str:
-    if event.get("kind") == "course":
+    if event.get("kind") in {"course", "boya"}:
         return "not_applicable"
     metadata = event.get("metadata") or {}
     state = metadata.get("submission_status")
@@ -33,7 +33,7 @@ def public_event(event: dict[str, Any]) -> dict[str, Any]:
     state = completion_state(event)
     label = {"submitted": "已提交", "completed": "已签到", "unsubmitted": "未提交",
              "partial": "部分提交", "unknown": "状态未知", "not_applicable": "待上课"}[state]
-    if event.get("kind") == "course":
+    if event.get("kind") in {"course", "boya"}:
         starts = event.get("starts_at")
         if expired(event):
             label = "已结束"
@@ -54,7 +54,7 @@ def public_event(event: dict[str, Any]) -> dict[str, Any]:
 def reminder_matches(rule: dict[str, Any], event: dict[str, Any], now: datetime | None = None) -> bool:
     if event.get("ignored"):
         return False
-    if event.get("kind") == "course":
+    if event.get("kind") in {"course", "boya"}:
         return not expired(event, now)
     if event.get("kind") not in {"assignment", "signin"}:
         return True

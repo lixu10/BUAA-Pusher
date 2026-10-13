@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 import app.main as main
 from app.adapters.judge import JudgeAdapter, SERVICE_LOGIN
 from app.db import Database
+from app.services.rules import RuleEngine
 from app.services.aggregator import Aggregator
 from app.services.school_sessions import SchoolSessionManager
 from app.upstream.sso import BuaaSsoSession, AuthenticationRequired, SSO_URL, UC_STATUS_URL
@@ -139,6 +140,8 @@ class WebVpnTransportTest(unittest.IsolatedAsyncioTestCase):
         manager.get = AsyncMock()
         try:
             with patch.object(main,"db",db), patch.object(main,"school_sessions",manager), \
+                 patch.object(main,"rule_engine",RuleEngine(db,True)), \
+                 patch.object(main,"notification_sender",Mock(send=AsyncMock())), \
                  patch.dict(main.sync_locks,{},clear=True), patch.dict(main.sync_progress,{(user["id"],"judge"):{}},clear=True):
                 await main.sync_one(user["id"], "judge")
             self.assertEqual("login_required", db.get_source(user["id"],"judge")["status"])

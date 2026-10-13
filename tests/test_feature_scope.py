@@ -67,13 +67,13 @@ class FeatureApiTest(unittest.TestCase):
         self.assertEqual(5, len(self.db.list_events(self.uid)))
         active = [s for s in data["sources"] if s["available"]]
         parked = [s for s in data["sources"] if not s["available"]]
-        self.assertEqual(4, len(active))
-        self.assertEqual(5, len(parked))
+        self.assertEqual(5, len(active))
+        self.assertEqual(4, len(parked))
         self.assertTrue(all(not s["enabled"] and s["detail"] == "Coming Soon" for s in parked))
         self.assertEqual(3, len(self.client.get("/api/events").json()))
 
     def test_disabled_features_cannot_be_enabled_via_api(self):
-        for source in ["grade", "bykc", "libbook", "ygdk", "cgyy", "custom"]:
+        for source in ["grade", "libbook", "ygdk", "cgyy", "custom"]:
             response = self.client.patch(f"/api/sources/{source}", json={"enabled": True})
             self.assertEqual(404 if source == "custom" else 403, response.status_code)
             if source != "custom":

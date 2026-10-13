@@ -52,7 +52,8 @@ function isCompleted(event) { return event.status === "done" || ["submitted", "c
 function isExpired(event) { const end = dateOf(event.kind === "assignment" ? event.due_at : event.ends_at); return Boolean(end && end < new Date()); }
 function statusLabel(event) {
   if (event.ignored) return "已忽略";
-  if (event.kind === "course") return event.status_label || (isExpired(event) ? "已结束" : dateOf(event.starts_at) && dateOf(event.starts_at) <= new Date() ? "上课中" : "待上课");
+  if (["course","boya"].includes(event.kind)) return event.status_label || (isExpired(event) ? "已结束" : dateOf(event.starts_at) && dateOf(event.starts_at) <= new Date() ? "上课中" : "待上课");
+  if (event.kind === "boya_catalog") return boyaStateLabels[event.enrollment_state] || "状态未知";
   let label = event.status_label || ({ done: event.kind === "signin" ? "已签到" : "已提交", pending: "未提交", missing: "未签到", partial: "部分提交" })[event.status] || "状态未知";
   const meta = event.metadata || {};
   if (meta.total_problems) label += ` ${meta.submitted_count || 0}/${meta.total_problems}`;
@@ -61,7 +62,7 @@ function statusLabel(event) {
 function attendanceLabel(event) { return event.kind === "course" && event.attendance ? ({done:"已签到",missing:"未签到",unknown:"签到状态未知"})[event.attendance.status] || "签到状态未知" : ""; }
 function statusBadge(event) { return `<span class="task-status ${event.ignored ? "ignored" : isCompleted(event) ? "complete" : ""}">${esc(statusLabel(event))}</span>${attendanceLabel(event) ? `<span class="attendance-badge ${event.attendance.status === "done" ? "complete" : ""}">${esc(attendanceLabel(event))}</span>` : ""}`; }
 function visibleCalendarEvents() { return state.data.events.filter((event) => !event.ignored && (state.showCompleted || !isCompleted(event))); }
-function sourceLabel(id) { return ({ spoc: "SPOC", judge: "JUDGE", byxt: "课程提醒", iclass: "课程签到" })[id] || id; }
+function sourceLabel(id) { return ({ spoc: "SPOC", judge: "JUDGE", byxt: "课程提醒", iclass: "课程签到", bykc: "博雅课程" })[id] || id; }
 function assignmentTypeLabel(type) { return /^\d+$/.test(String(type)) ? `类型 ${type}` : String(type); }
 function typeOptions(selected = "", source = "") {
   const types = [...new Set(state.data.events.filter((event) => event.kind === "assignment" && (!source || event.source === source)).map((event) => event.metadata?.assignment_type).filter(Boolean))].sort();
@@ -101,7 +102,7 @@ async function bootstrap() {
   try {
     const session = await api("/api/session");
     state.user = session.user; state.school = session.school; showApp(); await loadDashboard();
-    const initial = location.hash.slice(1); navigate(["today","calendar","tasks","alerts","connections","channels","account"].includes(initial) ? initial : "today");
+    const initial = location.hash.slice(1); navigate(["today","calendar","tasks","boya","alerts","connections","channels","account"].includes(initial) ? initial : "today");
   } catch (error) {
     if (error.status === 401) showAuth(); else toast("服务暂不可用");
   }
@@ -114,7 +115,7 @@ async function loadDashboard() {
   state.data = { ...dashboard, templates, triggers, connectors };
   state.school = state.data.school;
   renderShell(); renderAll();
-  if (state.data.sources.some((source) => source.syncing)) scheduleSyncPoll();
+  if (state.data.sources.some((source) => source.syncing) || state.data.boya_catalog_state?.syncing) scheduleSyncPoll();
 }
 
 function renderShell() {
@@ -129,7 +130,7 @@ function renderShell() {
   $("#source-summary").textContent = `${healthy}/${availableSources.length} 个来源正常`;
 }
 
-function renderAll() { renderToday(); renderCalendar(); renderTasks(); renderRules(); renderConnections(); renderChannels(); renderPreferences(); updatePeriodTitle(); }
+function renderAll() { renderToday(); renderCalendar(); renderTasks(); renderBoya(); renderRules(); renderConnections(); renderChannels(); renderPreferences(); updatePeriodTitle(); }
 
 function renderToday() {
   const selected = new Date(); selected.setHours(0,0,0,0);
@@ -140,7 +141,7 @@ function renderToday() {
   $("#today-label").textContent = fmtDate(selected, { year: "numeric", month: "long", day: "numeric", weekday: "long" });
   $("#today-summary").innerHTML = [
     ["今日待提交", events.filter((event) => event.kind === "assignment").length, "bi-journal-text"],
-    ["今日课程", events.filter((event) => event.kind === "course").length, "bi-journal-bookmark"],
+    ["今日课程", events.filter((event) => ["course","boya"].includes(event.kind)).length, "bi-journal-bookmark"],
     ["本周截止", deadlines.length, "bi-hourglass-split"]
   ].map(([label,count,icon]) => `<button type="button" class="today-metric" data-open-tasks><i class="bi ${icon}"></i><span>${label}</span><strong>${count}</strong></button>`).join("");
   $$("[data-open-tasks]").forEach((button) => button.addEventListener("click", () => {
@@ -244,6 +245,7 @@ function renderEventDetail(event) {
     extra += detailDisclosure("课程信息", body ? `<dl>${body}</dl>` : "");
   }
   const description = typeof meta.description === "string" ? meta.description : null;
+  if (["boya","boya_catalog"].includes(event.kind)) extra += renderBoyaDetail(event);
   extra += detailDisclosure(event.source === "judge" ? "作业页面内容" : event.kind === "assignment" ? "作业正文" : "详细说明", description ? `<div class="detail-long-text">${esc(description)}</div>` : "");
   return `<dl>${detailFields(fields)}</dl>${extra}`;
 }
@@ -291,8 +293,15 @@ function renderCalendar() {
 }
 
 function renderTasks() {
+  const prefs = state.data.preferences || {};
+  const visibleKinds = prefs.task_visible_kinds ?? ["assignment"];
+  const visibleSources = prefs.task_visible_sources ?? ["spoc", "judge", "byxt", "bykc"];
+  const sourceKinds={spoc:"assignment",judge:"assignment",byxt:"course",bykc:"boya"};
+  const sourceChoices=Object.keys(sourceKinds).filter(source=>visibleSources.includes(source)&&visibleKinds.includes(sourceKinds[source]));
+  if (state.taskSource && !sourceChoices.includes(state.taskSource)) state.taskSource="";
+  $("#task-source").innerHTML='<option value="">全部来源</option>'+sourceChoices.map(source=>`<option value="${source}" ${state.taskSource===source?'selected':''}>${esc(sourceLabel(source))}</option>`).join('');
   const tasks = state.data.events.filter((event) => {
-    if (!["assignment", "course"].includes(event.kind)) return false;
+    if (!visibleKinds.includes(event.kind) || !visibleSources.includes(event.source)) return false;
     if (state.taskSource && event.source !== state.taskSource) return false;
     if (state.taskType && event.metadata?.assignment_type !== state.taskType) return false;
     if (!state.taskHistory && state.taskStatus !== "ignored" && isExpired(event)) return false;
@@ -337,7 +346,7 @@ const reminderProfiles = {
   exam: { name: "考试提醒", icon: "bi-pencil-square", summary: "考试前分级提醒" },
   grade: { name: "新成绩提醒", icon: "bi-mortarboard", summary: "成绩发布时提醒" },
   fitness: { name: "阳光体育提醒", icon: "bi-activity", summary: "未达标且临近截止时提醒" },
-  "boya-course": { name: "博雅课程提醒", icon: "bi-compass", summary: "博雅课程开始前提醒" },
+  ...Object.fromEntries(Object.entries(boyaProfileNames).map(([key,name])=>[key,{name,icon:"bi-compass",summary:name}])),
   "boya-signout": { name: "博雅签退提醒", icon: "bi-box-arrow-right", summary: "签退结束前检查状态" },
   venue: { name: "体育场馆提醒", icon: "bi-building", summary: "预约开始与结束前提醒" },
   custom: { name: "自定义日程提醒", icon: "bi-sliders", summary: "按日程时间提醒" },
@@ -348,10 +357,11 @@ const connectionRuleTypes = {
   spoc: [["spoc-assignment", "作业截止提醒"], ["spoc-new-assignment", "新作业提醒"], ["spoc-assignment-grade", "作业新评分提醒"]],
   judge: [["judge-assignment", "作业截止提醒"], ["judge-new-assignment", "新作业提醒"]],
   iclass: [["signin", "未签到检查"]],
+  bykc: Object.entries(boyaProfileNames),
   assignments: [["assignment", "作业截止提醒（旧规则）"]],
 };
 const deadlineProfiles = new Set(["assignment", "spoc-assignment", "judge-assignment"]);
-const changeProfiles = new Set(["course-change", "spoc-new-assignment", "judge-new-assignment", "spoc-assignment-grade"]);
+const changeProfiles = new Set(["course-change", "spoc-new-assignment", "judge-new-assignment", "spoc-assignment-grade", "boya-course-change"]);
 const courseChangeTypes = {time:"时间变更",location:"教室变更",teacher:"教师变更",title:"名称变更",added:"新增课程",cancelled:"课程取消"};
 const activeProfiles = new Set(Object.values(connectionRuleTypes).flat().map(([key]) => key));
 function connectionForProfile(profile) { return Object.keys(connectionRuleTypes).find(key => connectionRuleTypes[key].some(([value]) => value === profile)) || "spoc"; }
@@ -393,11 +403,12 @@ function inferRuleProfile(rule) {
 }
 function profileSentence(rule) {
   const profile = inferRuleProfile(rule); const s = rule.profile_settings || {};
-  if (profile === "course") { const settings = settingsFromRule(rule, profile); return `${settings.timing === "before_end" ? "课程结束前" : "上课前"} ${settings.advance_minutes} 分钟提醒`; }
+  if (["course","boya-course"].includes(profile)) { const settings = settingsFromRule(rule, profile); return `${settings.timing === "before_end" ? "课程结束前" : "上课前"} ${settings.advance_minutes} 分钟提醒`; }
+  if (boyaCatalogProfiles.has(profile)) return `${boyaProfileNames[profile]}${s.advance_minutes?.length?` · 提前 ${s.advance_minutes.map(durationText).join('、')}`:''}${s.keywords?.length?` · ${s.keywords.join('、')}`:''}`;
   if (profile === "signin") return `${settingsFromRule(rule, profile).check_times.map(checkTimeText).join("、")}检查，未签到提醒`;
   if (profile === "library") return `开始前 ${s.before_start ?? 30} 分钟，离开失效前 ${s.before_expiry ?? 15} 分钟提醒`;
   if (deadlineProfiles.has(profile)) return `截止前 ${deadlinePoints(rule).map(advanceText).join("、")}提醒`;
-  if (profile === "course-change") return `同步发现${(s.change_types || []).map(key => courseChangeTypes[key]).join("、")}时提醒`;
+  if (["course-change","boya-course-change"].includes(profile)) return `同步发现${(s.change_types || []).map(key => courseChangeTypes[key]).join("、")}时提醒`;
   if (profile === "spoc-assignment-grade") return "教师批阅后提醒；得分或评语更新也提醒";
   if (changeProfiles.has(profile)) return "同步发现新作业时提醒";
   if (profile === "exam") return `考试前 ${s.days_before ?? 7} 天、${s.hours_before ?? 24} 小时、${s.final_hours ?? 2} 小时提醒`;
@@ -438,7 +449,7 @@ function renderDeliveries() {
 }
 
 function renderInbox() {
-  $("#inbox-list").innerHTML = state.data.inbox.length ? state.data.inbox.map((item) => `<div class="list-row"><span class="row-icon"><i class="bi bi-bell"></i></span><div><strong>${esc(item.title)}</strong><small>${esc(item.body)}</small></div><small>${fmtDate(dateOf(item.created_at), { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</small></div>`).join("") : empty("还没有站内通知", "规则触发后会显示在这里", "bi-bell");
+  $("#inbox-list").innerHTML = state.data.inbox.length ? state.data.inbox.map(item => `<div class="list-row"><span class="row-icon"><i class="bi bi-bell"></i></span><div><strong>${esc(item.title)}</strong><details class="notification-content"><summary>${esc(item.body.split("\n")[0])}</summary><div class="detail-long-text">${esc(item.body)}</div></details></div><small>${fmtDate(dateOf(item.created_at), {year:"numeric",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"})}</small></div>`).join("") : empty("还没有站内通知","规则触发后会显示在这里","bi-bell");
 }
 
 function renderSourceRow(source) {
@@ -491,6 +502,12 @@ function renderChannels() {
 
 function renderPreferences() {
   const prefs = state.data.preferences || {};
+  const taskForm = $("#task-visibility-form");
+  if (!taskForm.contains(document.activeElement)) {
+    for (const [name, fallback] of [["task_visible_kinds", ["assignment"]], ["task_visible_sources", ["spoc", "judge", "byxt", "bykc"]]]) {
+      $$(`#task-visibility-form [name="${name}"]`).forEach(input => input.checked = (prefs[name] ?? fallback).includes(input.value));
+    }
+  }
   const authForm = $("#auth-refresh-form");
   if (!authForm.contains(document.activeElement)) authForm.elements.auth_refresh_hours.value = prefs.auth_refresh_hours ?? 24;
   $("#preferences-form [name=quiet_start]").value = prefs.quiet_start || "";
@@ -524,13 +541,14 @@ function navigate(page) {
   $("#previous-period").hidden = page !== "calendar"; $("#next-period").hidden = page !== "calendar"; $("#today-button").hidden = page !== "calendar";
   $("#show-completed").closest(".visibility-control").hidden = page !== "calendar";
   if (page === "today") renderToday();
+  if (page === "boya") { renderBoya(); if (boyaView.tab === "catalog") loadBoyaCatalog(); }
   if (page === "calendar" && state.view === "week") { $("#calendar-canvas").scrollTop = state.weekScrollTop; $("#calendar-canvas").scrollLeft = state.weekScrollLeft; }
   updatePeriodTitle();
 }
 
 function updatePeriodTitle() {
   if (state.page === "today") { $("#period-title").textContent = "今日概览"; return; }
-  if (state.page !== "calendar") { $("#period-title").textContent = ({ tasks: "待办", alerts: "提醒", connections: "连接", channels: "通知渠道", account: "账户" })[state.page] || "今天"; return; }
+  if (state.page !== "calendar") { $("#period-title").textContent = ({ tasks: "待办", boya: "博雅课程", alerts: "提醒", connections: "连接", channels: "通知渠道", account: "账户" })[state.page] || "今天"; return; }
   if (state.view === "month") $("#period-title").textContent = fmtDate(state.cursor, { year: "numeric", month: "long" });
   else if (state.view === "week") { const a = startOfWeek(state.cursor), b = addDays(a,6); $("#period-title").textContent = `${fmtDate(a)}—${fmtDate(b)}`; }
   else $("#period-title").textContent = state.view === "agenda" ? "未来日程" : fmtDate(state.cursor, { year: "numeric", month: "long", day: "numeric", weekday: "long" });
@@ -552,7 +570,8 @@ function scheduleSyncPoll() {
     if (!state.user) return;
     try {
       await loadDashboard();
-      if (!state.data.sources.some((source) => source.syncing)) toast("同步已结束，请查看各来源状态");
+      if (state.page === "boya" && boyaView.tab === "catalog") await loadBoyaCatalog();
+      if (!state.data.sources.some((source) => source.syncing) && !state.data.boya_catalog_state?.syncing) toast("同步已结束，请查看各来源状态");
     } catch (error) { if (error.status !== 401) { toast("进度读取失败，正在重试"); scheduleSyncPoll(); } }
   }, 2000);
 }
@@ -596,9 +615,10 @@ function addActionRow(action = { channel: "in_app", channel_id: null, after_minu
   row.querySelector("button").addEventListener("click", () => { if ($$("#action-list .action-row").length > 1) row.remove(); }); $("#action-list").append(row);
 }
 function profileDefaults(profile) {
-  if (profile === "course") return {timing:"before_start",advance_minutes:15};
+  if (["course","boya-course"].includes(profile)) return {timing:"before_start",advance_minutes:profile==='boya-course'?30:15};
+  if (boyaCatalogProfiles.has(profile)) return {categories:[],campuses:[],sign_types:[],keywords:[],exclude_keywords:[],min_remaining:1,cooldown_minutes:15,include_preview:true,advance_minutes:[10,1]};
   if (deadlineProfiles.has(profile)) return { reminder_times: [{days:1,hours:0,minutes:0},{days:0,hours:2,minutes:0}], completion_filter: "incomplete" };
-  if (profile === "course-change") return { change_types: Object.keys(courseChangeTypes) };
+  if (["course-change","boya-course-change"].includes(profile)) return { change_types: Object.keys(courseChangeTypes) };
   if (profile === "spoc-assignment-grade") return {};
   if (changeProfiles.has(profile)) return { completion_filter: "incomplete" };
   return ({
@@ -614,7 +634,7 @@ function settingsFromRule(rule, profile) {
   if (profile === "signin") return {...profileDefaults(profile), ...(rule?.profile_settings || {}),
     check_times: rule?.profile_settings?.check_times || (rule?.triggers?.length ? rule.triggers : rule?.trigger ? [rule.trigger] : profileDefaults(profile).check_times)};
   if (deadlineProfiles.has(profile)) return {...profileDefaults(profile), ...(rule?.profile_settings || {}), reminder_times:deadlinePoints(rule)};
-  if (profile === "course") {
+  if (["course","boya-course"].includes(profile)) {
     const saved = rule?.profile_settings || {}, trigger = (rule?.triggers?.length ? rule.triggers : [rule?.trigger]).filter(Boolean)[0];
     const timing = saved.timing || (trigger?.anchor === "ends_at" ? "before_end" : "before_start");
     return {timing, advance_minutes:saved.advance_minutes ?? saved[timing] ?? (trigger ? Math.abs(trigger.offset_minutes) : 15)};
@@ -629,8 +649,9 @@ function settingsFromRule(rule, profile) {
 function renderProfileSettings(profile, settings = profileDefaults(profile)) {
   const n = (name, label, value, min = 0, max = 10080) => `<label class="rule-field"><span>${label}</span><input data-profile-setting="${name}" type="number" min="${min}" max="${max}" value="${esc(value)}" required></label>`;
   let html = "";
-  if (profile === "course") html = `<label class="rule-field"><span>提醒时机</span><select data-profile-setting="timing"><option value="before_start" ${settings.timing === "before_start" ? "selected" : ""}>上课前</option><option value="before_end" ${settings.timing === "before_end" ? "selected" : ""}>课程结束前</option></select></label><div class="course-advance">${n("advance_minutes", "提前（分钟）", settings.advance_minutes)}</div>`;
-  else if (profile === "course-change") html = `<div class="choice-grid change-type-grid">${Object.entries(courseChangeTypes).map(([value,label]) => `<label><input type="checkbox" data-change-type="${value}" ${(settings.change_types || []).includes(value) ? "checked" : ""}>${label}</label>`).join("")}</div>`;
+  if (["course","boya-course"].includes(profile)) html = `<label class="rule-field"><span>提醒时机</span><select data-profile-setting="timing"><option value="before_start" ${settings.timing === "before_start" ? "selected" : ""}>上课前</option><option value="before_end" ${settings.timing === "before_end" ? "selected" : ""}>课程结束前</option></select></label><div class="course-advance">${n("advance_minutes", "提前（分钟）", settings.advance_minutes)}</div>`;
+  else if (boyaCatalogProfiles.has(profile)) html = renderBoyaRuleSettings(profile,settings);
+  else if (["course-change","boya-course-change"].includes(profile)) html = `<div class="choice-grid change-type-grid">${Object.entries(courseChangeTypes).map(([value,label]) => `<label><input type="checkbox" data-change-type="${value}" ${(settings.change_types || []).includes(value) ? "checked" : ""}>${label}</label>`).join("")}</div>`;
   else if (changeProfiles.has(profile)) html = "";
   else if (profile === "signin") {
     const names = [...new Set(state.data.events.filter(e => e.kind === "course").map(e => e.title)), ...(settings.excluded_courses || [])];
@@ -652,10 +673,10 @@ function renderProfileSettings(profile, settings = profileDefaults(profile)) {
   $("#profile-settings").innerHTML = html;
   $("#rule-settings-fieldset").hidden = profile === "spoc-assignment-grade";
   Object.entries(settings).filter(([,value]) => !Array.isArray(value)).forEach(([key, value]) => { const input = $(`[data-profile-setting="${key}"]`); if (input) input.value = value; });
-  $("#rule-settings-title").textContent = profile === "course-change" ? "变更类别" : profile === "signin" ? "检查时间" : deadlineProfiles.has(profile) ? "截止前提醒" : changeProfiles.has(profile) ? "检测设置" : "提醒时间";
+  $("#rule-settings-title").textContent = ["course-change","boya-course-change"].includes(profile) ? "变更类别" : boyaCatalogProfiles.has(profile) ? "课程筛选与提醒" : profile === "signin" ? "检查时间" : deadlineProfiles.has(profile) ? "截止前提醒" : changeProfiles.has(profile) ? "检测设置" : "提醒时间";
 }
-function reminderTimeRow(point) {
-  return `<div class="reminder-time-row"><span>截止前</span>${[["days","天",365],["hours","小时",23],["minutes","分钟",59]].map(([key,label,max]) => `<label><input type="number" data-advance="${key}" min="0" max="${max}" step="1" value="${esc(point[key] || 0)}" aria-label="提前${label}" required><span>${label}</span></label>`).join("")}<button type="button" class="icon-button" data-remove-reminder-time aria-label="删除提醒时间"><i class="bi bi-x"></i></button></div>`;
+function reminderTimeRow(point, prefix="截止前") {
+  return `<div class="reminder-time-row"><span>${esc(prefix)}</span>${[["days","天",365],["hours","小时",23],["minutes","分钟",59]].map(([key,label,max]) => `<label><input type="number" data-advance="${key}" min="0" max="${max}" step="1" value="${esc(point[key] || 0)}" aria-label="提前${label}" required><span>${label}</span></label>`).join("")}<button type="button" class="icon-button" data-remove-reminder-time aria-label="删除提醒时间"><i class="bi bi-x"></i></button></div>`;
 }
 function checkTimeText(point) { return `${point.anchor === "ends_at" ? "结束" : "开始"}${point.offset_minutes === 0 ? "时" : `${point.offset_minutes < 0 ? "前" : "后"} ${Math.abs(point.offset_minutes)} 分钟`}`; }
 function checkTimeRow(point) {
@@ -687,11 +708,12 @@ function rulePayload(form) {
   if (new Set(actions.map(a => `${a.channel}:${a.channel_id}`)).size !== actions.length) throw new Error("通知方式不能重复");
   let scope = { kinds: [], sources: [] }, triggers = [], conditions = [], cancel_conditions = [];
   let repeat = { every_minutes: null, max_count: 1, until_anchor: null };
-  if (profile === "course") { scope = { kinds: ["course"], sources: ["byxt"] }; triggers = [{ anchor: settings.timing === "before_end" ? "ends_at" : "starts_at", offset_minutes: -settings.advance_minutes }]; }
+  if (["course","boya-course"].includes(profile)) { scope = { kinds: [profile==='boya-course'?'boya':'course'], sources: [profile==='boya-course'?'bykc':'byxt'] }; triggers = [{ anchor: settings.timing === "before_end" ? "ends_at" : "starts_at", offset_minutes: -settings.advance_minutes }]; }
+  else if (boyaCatalogProfiles.has(profile)) { collectBoyaSettings(settings); scope={kinds:['boya_catalog'],sources:['bykc']}; }
   else if (changeProfiles.has(profile)) {
     const source = connectionForProfile(profile);
-    scope = {kinds:[source === "byxt" ? "course" : "assignment"],sources:[source]};
-    if (profile === "course-change") {
+    scope = {kinds:[source === "bykc" ? "boya" : source === "byxt" ? "course" : "assignment"],sources:[source]};
+    if (["course-change","boya-course-change"].includes(profile)) {
       settings.change_types = $$('[data-change-type]:checked').map(input => input.dataset.changeType);
       if (!settings.change_types.length) throw new Error("至少选择一种课程变更类别");
     }
@@ -732,6 +754,7 @@ const channelFieldSets = {
 function renderChannelFields() { $("#channel-fields").innerHTML = channelFieldSets[$("#channel-form [name=type]").value]; }
 
 function bindEvents() {
+  bindBoyaEvents();
   $$("[data-week-hour]").forEach((button) => button.addEventListener("click", () => { state.weekScrollTop = Number(button.dataset.weekHour) * WEEK_HOUR_HEIGHT; $("#calendar-canvas").scrollTop = state.weekScrollTop; }));
   $("#calendar-canvas").addEventListener("scroll", (event) => { if (state.view === "week" && state.page === "calendar") { state.weekScrollTop = event.currentTarget.scrollTop; state.weekScrollLeft = event.currentTarget.scrollLeft; } }, {passive:true});
   $$("[data-task-status]").forEach((button) => button.addEventListener("click", () => { state.taskStatus = button.dataset.taskStatus; renderTasks(); }));
@@ -772,8 +795,8 @@ function bindEvents() {
   $("#school-form").addEventListener("submit", async (event) => { event.preventDefault(); const formElement = event.currentTarget; const formData = new FormData(formElement); const values = Object.fromEntries(formData); values.remember_password = formData.has("remember_password"); if (!values.captcha) delete values.captcha; try { const result = await api("/api/school/login", { method: "POST", body: JSON.stringify(values) }); if (result.captcha_required) { $("#captcha-field").hidden = false; $("#captcha-image").src = `/api/school/captcha/${encodeURIComponent(result.captcha_id)}?network_mode=${values.network_mode || "direct"}&t=${Date.now()}`; return; } $("#school-dialog").close(); formElement.reset(); await loadDashboard(); toast(result.network_mode === "webvpn" ? "学校 WebVPN 已登录" : result.school?.status === "connected" ? "北航账号已连接" : (result.school?.detail || "教务授权未完成")); } catch (e) { $("#school-error").textContent = e.message; } });
   $$('[data-alert-tab]').forEach((button) => button.addEventListener("click", () => { $$('[data-alert-tab]').forEach((item) => item.classList.toggle("active", item === button)); $$('[data-alert-panel]').forEach((panel) => panel.classList.toggle("active", panel.dataset.alertPanel === button.dataset.alertTab)); }));
   $("#add-rule-button").addEventListener("click", () => openRuleDialog()); $("#add-action").addEventListener("click", () => addActionRow());
-  $("#rule-connection").addEventListener("change", (event) => { renderRuleTypes(event.currentTarget.value); const profile = $("#rule-profile").value; renderProfileSettings(profile); $("#rule-form [name=name]").value = reminderProfiles[profile].name; });
-  $("#rule-profile").addEventListener("change", (event) => { const profile = event.currentTarget.value; renderProfileSettings(profile); $("#rule-form [name=name]").value = reminderProfiles[profile].name; });
+  $("#rule-connection").addEventListener("change", (event) => { renderRuleTypes(event.currentTarget.value); const profile = $("#rule-profile").value; renderProfileSettings(profile); $("#rule-form [name=name]").value = reminderProfiles[profile].name; if (!$("#rule-form").elements.rule_id.value && boyaCatalogProfiles.has(profile)) $("#rule-form").elements.quiet_policy.value="ignore"; });
+  $("#rule-profile").addEventListener("change", (event) => { const profile = event.currentTarget.value; renderProfileSettings(profile); $("#rule-form [name=name]").value = reminderProfiles[profile].name; if (!$("#rule-form").elements.rule_id.value && boyaCatalogProfiles.has(profile)) $("#rule-form").elements.quiet_policy.value="ignore"; });
   $("#profile-settings").addEventListener("click", event => {
     if (event.target.closest("#add-check-time")) {
       if ($$(".check-time-row").length >= 10) { toast("最多 10 个检查时间"); return; }
@@ -802,7 +825,15 @@ function bindEvents() {
   $("#add-channel-button").addEventListener("click", () => { $("#channel-form").reset(); $("#channel-error").textContent = ""; renderChannelFields(); $("#channel-dialog").showModal(); }); $("#channel-form [name=type]").addEventListener("change", renderChannelFields); renderChannelFields();
   $("#channel-form").addEventListener("submit", async (event) => { event.preventDefault(); const formElement = event.currentTarget; const data = Object.fromEntries(new FormData(formElement)); const type = data.type, name = data.name; delete data.type; delete data.name; if ("ssl" in data) data.ssl = true; try { await api("/api/channels", { method: "POST", body: JSON.stringify({ type, name, enabled: true, config: data }) }); $("#channel-dialog").close(); formElement.reset(); await loadDashboard(); toast("渠道已保存"); } catch (e) { $("#channel-error").textContent = e.message; } });
   $("#preferences-form").addEventListener("submit", async (event) => { event.preventDefault(); const data = Object.fromEntries(new FormData(event.currentTarget)); await api("/api/preferences", { method: "PUT", body: JSON.stringify({ timezone: "Asia/Shanghai", quiet_start: data.quiet_start || null, quiet_end: data.quiet_end || null }) }); await loadDashboard(); toast("安静时段已保存"); });
-  $("#sync-button").addEventListener("click", (e) => syncSources(e.currentTarget)); $("#source-sync").addEventListener("click", (e) => syncSources(e.currentTarget));
+  $("#task-visibility-form").addEventListener("submit", async (event) => {
+    event.preventDefault(); const form = event.currentTarget, data = new FormData(form);
+    try {
+      await api("/api/preferences", {method:"PUT", body:JSON.stringify({task_visible_kinds:data.getAll("task_visible_kinds"), task_visible_sources:data.getAll("task_visible_sources")})});
+      document.activeElement?.blur(); await loadDashboard(); toast("待办显示规则已保存");
+    } catch (error) { toast(error.message); }
+  });
+  $("#task-display-settings").addEventListener("click", () => { navigate("account"); $("#task-visibility-form").scrollIntoView({behavior:"smooth", block:"center"}); });
+  $("#sync-button").addEventListener("click", (e) => state.page==='boya'?syncBoyaComponent():syncSources(e.currentTarget)); $("#source-sync").addEventListener("click", (e) => syncSources(e.currentTarget));
   $("#logout-button").addEventListener("click", async () => { await api("/api/account/logout", { method: "POST" }); state.user = null; showAuth(); });
 }
 

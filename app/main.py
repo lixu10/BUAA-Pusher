@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, Query
 from fastapi.responses import Response as RawResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -23,7 +23,7 @@ from app.features import ACTIVE_SOURCES, SCHOOL_SOURCES, event_available, public
 from app.models import (
     AutomationRuleCreate, AutomationRuleUpdate, EventCreate, EventIgnoreUpdate, NotificationChannelCreate,
     NotificationChannelUpdate, PreferencesUpdate, RegisterRequest, SchoolLoginRequest, SourceUpdate,
-    UserLoginRequest,
+    UserLoginRequest, BoyaCatalogUpdate,
 )
 from app.security import CredentialVault, hash_password, new_token, token_digest, verify_password
 from app.services.aggregator import Aggregator
@@ -36,6 +36,7 @@ from app.services.school_sessions import SchoolSessionManager
 from app.services.school_recovery import SchoolAuthRecovery
 from app.services.source_health import source_transition_message
 from app.services.worker import BackgroundWorker
+from app.services.boya import catalog_options, enrollment_state, filter_matches, record_catalog
 from app.upstream.sso import LoginFailed, AuthenticationRequired
 
 
@@ -201,7 +202,7 @@ async def sync_for(user_id: int, source_ids: set[str] | None = None) -> dict[str
 def start_sync(user_id: int, source_ids: set[str]) -> dict[str, asyncio.Task]:
     tasks = {}
     for source_id in sorted(source_ids & ACTIVE_SOURCES):
-        if not (db.get_source(user_id, source_id) or {}).get("enabled", source_id != "iclass"):
+        if not (db.get_source(user_id, source_id) or {}).get("enabled", source_id not in {"iclass", "bykc"}):
             continue
         key = (user_id, source_id)
         task = sync_jobs.get(key)
@@ -239,7 +240,7 @@ async def sync_one(user_id: int, source_id: str) -> int:
     # Enforce the boundary even for internal/direct calls, before SSO access.
     if source_id not in ACTIVE_SOURCES:
         return 0
-    if source_id == "iclass" and not (db.get_source(user_id, source_id) or {}).get("enabled", False):
+    if source_id in {"iclass", "bykc"} and not (db.get_source(user_id, source_id) or {}).get("enabled", False):
         return 0
     key = (user_id, source_id)
     previous = db.get_source(user_id, source_id)
@@ -250,7 +251,7 @@ async def sync_one(user_id: int, source_id: str) -> int:
             adapter = JudgeAdapter(school, previous_events=db.list_events(user_id, limit=5000),
                                    academic_window=academic_window(db.preferences(user_id)))
         else:
-            adapter = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "iclass": IClassAdapter}[source_id](school)
+            adapter = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "iclass": IClassAdapter, "bykc": BykcAdapter}[source_id](school)
         adapter.on_progress = lambda values: sync_progress.__setitem__(key, values)
         sync_progress[key]["phase"] = "读取数据"
         async def read_events(current_adapter):
@@ -266,6 +267,8 @@ async def sync_one(user_id: int, source_id: str) -> int:
             result = await aggregator.sync()
         if source_id == "iclass" and (db.get_source(user_id, source_id) or {}).get("status") == "healthy":
             AttendanceService(db, None).record(user_id, [e for e in db.list_events(user_id) if e["source"] == "iclass"])
+        if source_id == "bykc" and (db.get_source(user_id, source_id) or {}).get("status") == "healthy":
+            db.refresh_boya_selection(user_id)
         current_sources = db.list_sources(user_id)
         current = db.get_source(user_id, source_id)
         if current and current["status"] == "login_required":
@@ -287,12 +290,12 @@ async def sync_one(user_id: int, source_id: str) -> int:
         raise
     except AuthenticationRequired as exc:
         mark_school_login_required(user_id, school, str(exc))
-        label = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "judge": JudgeAdapter, "iclass": IClassAdapter}[source_id].label
+        label = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "judge": JudgeAdapter, "iclass": IClassAdapter, "bykc": BykcAdapter}[source_id].label
         db.upsert_source(user_id, {"id": source_id, "label": label, "status": "login_required",
             "detail": str(exc), "last_sync_at": now_iso(), "event_count": (previous or {}).get("event_count", 0)})
         return 0
     except Exception as exc:
-        label = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "judge": JudgeAdapter, "iclass": IClassAdapter}[source_id].label
+        label = {"spoc": SpocAdapter, "byxt": CourseReminderAdapter, "judge": JudgeAdapter, "iclass": IClassAdapter, "bykc": BykcAdapter}[source_id].label
         db.upsert_source(user_id, {"id": source_id, "label": label, "status": "error",
             "detail": Aggregator._error_detail(exc), "last_sync_at": now_iso(),
             "event_count": (previous or {}).get("event_count", 0)})
@@ -311,6 +314,84 @@ async def sync_all_remembered() -> None:
         due = set(db.due_source_ids(user_id)) & ACTIVE_SOURCES
         if due:
             start_sync(user_id, due)
+        if any(s["id"] == "bykc" for s in sources):
+            state = db.boya_state(user_id)
+            interval, at = state["refresh_interval_minutes"], RuleEngine.parse_time(state.get("last_sync_at"))
+            from datetime import UTC, datetime, timedelta
+            if interval and (not at or datetime.now(UTC) >= at + timedelta(minutes=interval)):
+                start_boya_catalog_sync(user_id)
+
+
+def start_boya_catalog_sync(user_id):
+    if not (db.get_source(user_id, "bykc") or {}).get("enabled", False):
+        return None
+    key = (user_id, "bykc_catalog")
+    if key not in sync_jobs or sync_jobs[key].done():
+        sync_progress[key] = {"completed": 0, "total": 0, "phase": "读取课程目录"}
+        sync_jobs[key] = asyncio.create_task(sync_boya_catalog(user_id), name=f"boya-catalog-{user_id}")
+    return sync_jobs[key]
+
+
+async def sync_boya_catalog(user_id):
+    key = (user_id, "bykc_catalog")
+    previous = db.boya_state(user_id)
+    try:
+        school = await source_session(user_id, "bykc")
+        adapter = BykcAdapter(school)
+        adapter.on_progress = lambda values: sync_progress.__setitem__(key, values)
+        courses = await asyncio.wait_for(school_recovery.run(user_id, school, adapter.catalog,
+            lambda: remembered_school_credentials(user_id)), timeout=180)
+        if not (db.get_source(user_id, "bykc") or {}).get("enabled", False):
+            return 0
+        db.replace_boya_catalog(user_id, courses)
+        if (db.get_source(user_id, "bykc") or {}).get("status") == "healthy":
+            db.refresh_boya_selection(user_id, keep_confirmed=True)
+        record_catalog(db, user_id, db.list_boya_courses(user_id))
+        db.update_boya_state(user_id, status="healthy", detail="", last_sync_at=now_iso())
+        rule_engine.plan_user(user_id)
+        return len(courses)
+    except AuthenticationRequired:
+        db.update_boya_state(user_id, status="login_required", detail="博雅目录需要重新认证", last_sync_at=now_iso())
+        return 0
+    except Exception as exc:
+        db.update_boya_state(user_id, status="error", detail=Aggregator._error_detail(exc), last_sync_at=now_iso())
+        return 0
+    finally:
+        sync_progress.pop(key, None)
+        source = db.get_source(user_id, "bykc") or {}
+        current = db.boya_state(user_id)
+        message = source_transition_message(previous, {**current, "label":"博雅课程目录", "enabled":source.get("enabled",False), "network_mode":source.get("network_mode","direct"), "event_count":len(db.list_boya_courses(user_id))})
+        if message:
+            try:
+                await notification_sender.send(user_id, "in_app", None, message[0], message[1])
+            except Exception as exc:
+                logger.warning("Catalog health notification failed error=%s",type(exc).__name__)
+
+
+async def refresh_boya_notifications(user_id, ids):
+    try:
+        mode = (db.get_source(user_id, "bykc") or {}).get("network_mode", "direct")
+        success, detail = await refresh_notification_source(user_id, "bykc")
+        if not success:
+            return False, detail
+        school = await source_session(user_id, "bykc")
+        adapter = BykcAdapter(school)
+        courses = await asyncio.wait_for(school_recovery.run(user_id, school, lambda: adapter.course_details(ids),
+            lambda: remembered_school_credentials(user_id)), timeout=180)
+        current_source = db.get_source(user_id, "bykc") or {}
+        if not current_source.get("enabled", False) or current_source.get("network_mode", "direct") != mode:
+            return False, "博雅连接设置已变更"
+        for event in courses:
+            selected = db.event_by_key(user_id, "bykc", f"course-{event['metadata']['course_id']}")
+            event["metadata"]["selected"] = bool(selected) or event["metadata"].get("selected") is True
+            db.save_boya_course(user_id, event)
+        rule_engine.plan_user(user_id)
+        return True, ""
+    except Exception:
+        return False, "课程详情复核失败，暂不发送旧状态"
+
+
+dispatcher.catalog_refresher = refresh_boya_notifications
 
 
 async def refresh_school_auth(user_id, mode):
@@ -480,14 +561,16 @@ def dashboard(user: dict[str, Any] = Depends(current_user)):
                       if event_available(event) and in_academic_window(event, data["academic_window"])]
     data["events"] = merge_calendar(data["events"], (db.get_source(user["id"], "iclass") or {}).get("enabled", False))
     data["attendance_details"] = AttendanceService(db, None).details(user["id"])
+    data["boya_options"] = catalog_options(db.list_boya_courses(user["id"]))
+    data["boya_catalog_state"] = {**db.boya_state(user["id"]), "syncing": bool(sync_jobs.get((user["id"], "bykc_catalog")) and not sync_jobs[(user["id"], "bykc_catalog")].done()), "progress": sync_progress.get((user["id"], "bykc_catalog"))}
     data["rules"] = [public_rule(rule) for rule in data["rules"]]
     existing = {source["id"]: source for source in data["sources"]}
     data["sources"] = []
     for manifest in connectors(user):
         source = existing.get(manifest["id"], {
-            "id": manifest["id"], "label": manifest["label"], "enabled": manifest["id"] != "iclass",
+            "id": manifest["id"], "label": manifest["label"], "enabled": manifest["id"] not in {"iclass", "bykc"},
             "status": "not_connected", "detail": "未连接", "last_sync_at": None,
-            "event_count": 0, "refresh_interval_minutes": 15 if manifest["id"] == "iclass" else 60,
+            "event_count": 0, "refresh_interval_minutes": 15 if manifest["id"] == "iclass" else 30 if manifest["id"] == "bykc" else 60,
             "network_mode": "direct",
         })
         available = manifest["available"]
@@ -501,6 +584,65 @@ def dashboard(user: dict[str, Any] = Depends(current_user)):
             "availability": manifest["availability"],
             **({} if available else {"enabled": False, "status": "coming_soon", "detail": "Coming Soon"})})
     return data
+
+
+@app.get("/api/boya/courses")
+def boya_courses(page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100), search: str = Query("", max_length=120), category: str = "", campus: str = "", sign_type: str = "", status: str = "", user: dict = Depends(current_user)):
+    rows = db.list_boya_courses(user["id"])
+    settings = {"keywords": [search] if search.strip() else [], "categories": [category] if category else [], "campuses": [campus] if campus else [], "sign_types": [sign_type] if sign_type else []}
+    rows = [{**event, "enrollment_state": enrollment_state(event)} for event in rows if filter_matches(settings, event)]
+    if status:
+        rows = [event for event in rows if event["enrollment_state"] == status]
+    rows.sort(key=lambda event: (event["metadata"].get("enrollment_starts_at") or "9999", event["title"]))
+    return {"courses": rows[(page - 1) * size:page * size], "total": len(rows), "page": page, "size": size, "state": db.boya_state(user["id"])}
+
+
+@app.get("/api/boya/courses/{course_id}")
+def boya_detail(course_id: str, user: dict = Depends(current_user)):
+    cached = db.boya_course(user["id"], course_id)
+    selected = db.event_by_key(user["id"], "bykc", f"course-{course_id}")
+    if not cached and not selected:
+        raise HTTPException(status_code=404, detail="课程不存在于当前账户")
+    event = cached or selected
+    personal = {key: selected["metadata"].get(key) for key in ("chosen_id", "enrolled_at", "checkin", "pass", "score", "sign_info", "homework", "homework_attachment_name")} if selected else {}
+    return {**event, "metadata": {**event["metadata"], **personal}, "enrollment_state": "selected" if selected else enrollment_state(event)}
+
+
+@app.post("/api/boya/catalog/sync", status_code=202)
+async def boya_catalog_sync(user: dict = Depends(csrf_user)):
+    if start_boya_catalog_sync(user["id"]) is None:
+        raise HTTPException(status_code=409, detail="请先启用博雅连接")
+    return {"started": ["bykc_catalog"]}
+
+
+@app.patch("/api/boya/catalog/settings")
+def boya_catalog_settings(payload: BoyaCatalogUpdate, user: dict = Depends(csrf_user)):
+    db.update_boya_state(user["id"], refresh_interval_minutes=payload.refresh_interval_minutes)
+    return db.boya_state(user["id"])
+
+
+@app.post("/api/boya/courses/{course_id}/refresh")
+async def refresh_boya_detail(course_id: str, user: dict = Depends(csrf_user)):
+    boya_detail(course_id, user)
+    if not (db.get_source(user["id"], "bykc") or {}).get("enabled", False):
+        raise HTTPException(status_code=409, detail="请先启用博雅连接")
+    school = await source_session(user["id"], "bykc")
+    mode = (db.get_source(user["id"], "bykc") or {}).get("network_mode", "direct")
+    adapter = BykcAdapter(school)
+    try:
+        courses = await asyncio.wait_for(school_recovery.run(user["id"], school, lambda: adapter.course_details([course_id]), lambda: remembered_school_credentials(user["id"])), timeout=90)
+        source = db.get_source(user["id"], "bykc") or {}
+        if not source.get("enabled", False) or source.get("network_mode", "direct") != mode:
+            raise HTTPException(status_code=409, detail="连接设置已变更，请重新读取")
+        db.save_boya_course(user["id"], courses[0])
+        if (db.get_source(user["id"], "bykc") or {}).get("status") == "healthy":
+            db.refresh_boya_selection(user["id"], keep_confirmed=True)
+        rule_engine.plan_user(user["id"])
+        return boya_detail(course_id, user)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="博雅详情读取失败，旧数据已保留") from exc
 
 
 @app.get("/api/events")
@@ -541,13 +683,16 @@ def require_available(available: bool) -> None:
 
 @app.post("/api/sources/sync", status_code=202)
 async def sync_sources(user: dict[str, Any] = Depends(csrf_user)):
-    return {"started": list(start_sync(user["id"], set(ACTIVE_SOURCES)))}
+    started = list(start_sync(user["id"], set(ACTIVE_SOURCES)))
+    if start_boya_catalog_sync(user["id"]) is not None:
+        started.append("bykc_catalog")
+    return {"started": started}
 
 
 @app.post("/api/sources/{source_id}/sync", status_code=202)
 async def sync_source(source_id: str, user: dict[str, Any] = Depends(csrf_user)):
     require_available(source_id in ACTIVE_SOURCES)
-    if not (db.get_source(user["id"], source_id) or {}).get("enabled", source_id != "iclass"):
+    if not (db.get_source(user["id"], source_id) or {}).get("enabled", source_id not in {"iclass", "bykc"}):
         raise HTTPException(status_code=409, detail="请先启用此来源")
     return {"started": list(start_sync(user["id"], {source_id}))}
 
@@ -560,6 +705,8 @@ def update_source(source_id: str, payload: SourceUpdate, user: dict[str, Any] = 
         raise HTTPException(status_code=403, detail="Coming Soon")
     if payload.network_mode is not None or db.get_source(user["id"], source_id) is None:
         running = sync_jobs.get((user["id"], source_id))
+        if source_id == "bykc" and sync_jobs.get((user["id"], "bykc_catalog")) and not sync_jobs[(user["id"], "bykc_catalog")].done():
+            raise HTTPException(status_code=409, detail="请等待博雅目录同步完成后切换模式")
         if running and not running.done():
             raise HTTPException(status_code=409, detail="请等待当前同步完成后切换访问模式")
         if source_id == "iclass" and attendance_service.locks.get(user["id"]) and attendance_service.locks[user["id"]].locked():
@@ -699,7 +846,8 @@ async def test_channel(channel_id: int, user: dict[str, Any] = Depends(csrf_user
     if not channel:
         raise HTTPException(status_code=404, detail="channel_not_found")
     try:
-        await notification_sender.send(user["id"], channel["type"], channel_id, "PUAA 测试通知", "通知渠道配置成功")
+        body = f"通知渠道配置成功\n渠道：{channel['name']}\n类型：{channel['type']}\n测试时间：{datetime.now().astimezone().isoformat(timespec='seconds')}\n这是手动测试消息，不查询或修改学校数据。"
+        await notification_sender.send(user["id"], channel["type"], channel_id, "PUAA 测试通知", body)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     return {"status": "sent"}
@@ -707,7 +855,7 @@ async def test_channel(channel_id: int, user: dict[str, Any] = Depends(csrf_user
 
 @app.post("/api/channels/test-in-app")
 async def test_in_app(user: dict[str, Any] = Depends(csrf_user)):
-    await notification_sender.send(user["id"], "in_app", None, "PUAA 测试通知", "站内通知工作正常")
+    await notification_sender.send(user["id"], "in_app", None, "PUAA 测试通知", f"站内通知工作正常\n渠道：站内通知\n测试时间：{datetime.now().astimezone().isoformat(timespec='seconds')}\n这是手动测试消息，不查询或修改学校数据。")
     return {"status": "sent"}
 
 

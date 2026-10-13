@@ -80,6 +80,7 @@ function app() {
   };
   const context = vm.createContext({ Intl, Date, Set, Map, console, setTimeout, clearTimeout,
     document: { querySelector: node, querySelectorAll: () => [], addEventListener() {} } });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/boya.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8'), context);
   return { context, elements, run: (code) => vm.runInContext(code, context) };
 }
@@ -280,11 +281,61 @@ test('course change contains additions and grade settings never hide submitted g
 
 test('course tasks show course status instead of attendance or submission', () => {
   const ui = app();
+  ui.run('state.data.preferences.task_visible_kinds=["assignment","course","boya"];');
   ui.run('state.data.events = [{id:1,kind:"course",source:"byxt",title:"真实课表课程",starts_at:"2030-09-01",ends_at:"2030-09-02",status:"upcoming",completion_state:"not_applicable",status_label:"待上课",location:"教室",metadata:{teacher:"教师"}}]; renderTasks();');
   const html = ui.elements.get('#task-list').innerHTML;
   assert.match(html, /真实课表课程/); assert.match(html, /待上课/); assert.doesNotMatch(html, /签到|未提交/);
   ui.run('state.taskStatus="submitted"; renderTasks();');
   assert.doesNotMatch(ui.elements.get('#task-list').innerHTML, /真实课表课程/);
+});
+
+test('personal task visibility defaults to assignments and leaves calendars untouched', () => {
+  const ui = app();
+  ui.run(`state.data.events = [
+    {id:1,kind:"course",source:"byxt",title:"teaching",starts_at:"2030-09-01",ends_at:"2030-09-02"},
+    {id:2,kind:"boya",source:"bykc",title:"boya",starts_at:"2030-09-01",ends_at:"2030-09-02"},
+    {id:3,kind:"assignment",source:"spoc",title:"spoc-work",due_at:"2030-09-02"},
+    {id:4,kind:"assignment",source:"judge",title:"judge-work",due_at:"2030-09-02"}
+  ]; renderTasks();`);
+  let html=ui.elements.get('#task-list').innerHTML;
+  assert.match(html,/spoc-work|judge-work/); assert.doesNotMatch(html,/teaching|data-calendar-event="2"/);
+  assert.equal(ui.run('visibleCalendarEvents().length'),4);
+  ui.run('state.data.preferences={task_visible_kinds:["assignment","boya"],task_visible_sources:["judge","bykc"]}; renderTasks();');
+  html=ui.elements.get('#task-list').innerHTML;
+  assert.match(html,/judge-work/); assert.match(html,/data-calendar-event="2"/); assert.doesNotMatch(html,/spoc-work|teaching/);
+  ui.run('state.data.preferences.task_visible_kinds=[];renderTasks();');
+  assert.doesNotMatch(ui.elements.get('#task-list').innerHTML,/data-calendar-event/);
+  assert.equal(ui.run('visibleCalendarEvents().length'),4);
+});
+
+test('Boya uses its own seven rule types and minute-level filtered catalog editor', () => {
+  const ui=app();
+  const types=JSON.parse(ui.run('JSON.stringify(connectionRuleTypes.bykc)'));
+  assert.equal(types.length,7); assert.ok(types.some(([id])=>id==='boya-seats'));
+  assert.ok(types.some(([id])=>id==='boya-new-course'));
+  assert.doesNotMatch(ui.run('renderBoyaRuleSettings("boya-enrollment-soon",profileDefaults("boya-enrollment-soon"))'),/再次提醒|同步仅建立基线/);
+  ui.run('state.data.boya_options={categories:[{value:"2",label:"美育"}],campuses:[{value:"1",label:"学院路"}],sign_types:[{value:"2",label:"签到＋签退"}]};');
+  const html=ui.run('renderBoyaRuleSettings("boya-enrollment-soon",{categories:["2"],sign_types:["2"],advance_minutes:[11,1]})');
+  assert.match(html,/课程分类|适用校区|签到方式|报名开放前/);
+  assert.match(html,/data-boya-filter="categories"[^>]+checked/);
+  assert.match(html,/data-advance="minutes"/); assert.match(html,/添加时间/);
+  assert.match(ui.run('renderBoyaRuleSettings("boya-seats",profileDefaults("boya-seats"))'),/最低余量|通知间隔/);
+});
+
+test('Boya details keep long text collapsed and zero personal scores visible',()=>{
+  const ui=app();
+  const html=ui.run('renderEventDetail({kind:"boya",source:"bykc",title:"博雅",metadata:{score:0,sign_type:"2",category_names:["美育"],campus_names:["学院路"],description:"<script>bad()</script>",homework_description:"要求",sign_windows:{signStartDate:"2030-09-01T10:00:00+08:00"}}})');
+  assert.match(html,/<dt>得分<\/dt><dd>0<\/dd>/);
+  assert.match(html,/签到＋签退|签到开始|作业信息|详细说明/);
+  assert.match(html,/&lt;script/); assert.doesNotMatch(html,/<script|<details[^>]*\bopen\b/);
+});
+
+test('multiline inbox only shows the first line until expanded',()=>{
+  const ui=app();
+  ui.run('state.data.inbox=[{title:"提醒",body:"作业截止提醒\\n地点：教室\\n长正文",created_at:"2030-09-01"}]; renderInbox();');
+  const html=ui.elements.get('#inbox-list').innerHTML;
+  assert.match(html,/<summary>作业截止提醒<\/summary>/);
+  assert.doesNotMatch(html,/<details[^>]*\bopen\b/);
 });
 
 test('calendar completion visibility is independent of task filters', () => {

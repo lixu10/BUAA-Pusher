@@ -18,6 +18,8 @@ def course_fields(event: dict[str, Any]) -> dict[str, Any]:
 
 def course_group(event: dict[str, Any]) -> tuple[str, ...]:
     meta = event.get("metadata") or {}
+    if event.get("source") == "bykc":
+        return ("bykc", str(meta.get("course_id") or event.get("external_id")))
     # The upstream occurrence id includes the date/section and changes on a move.
     # Match unmatched occurrences only when one lesson remains in this course/week.
     start = str(event.get("starts_at") or "")
@@ -64,14 +66,14 @@ class SyncChangeTracker:
         self.db, self.user_id = db, user_id
 
     def record(self, source: str, events: list[dict], complete: bool) -> None:
-        if source not in {"byxt", "spoc", "judge"} or not complete:
+        if source not in {"byxt", "spoc", "judge", "bykc"} or not complete:
             return  # Never infer cancellations or establish a baseline from partial data.
-        expected = "course" if source == "byxt" else "assignment"
+        expected = "boya" if source == "bykc" else "course" if source == "byxt" else "assignment"
         current = {str(event["external_id"]): event for event in events if event.get("kind") == expected}
         previous = self.db.get_sync_snapshot(self.user_id, source)
         changes = []
         if previous is not None:
-            if source == "byxt":
+            if source in {"byxt", "bykc"}:
                 for key, stored in previous.items():
                     local = self.db.event_by_key(self.user_id, source, key)
                     if local:
@@ -106,7 +108,7 @@ def change_matches(rule: dict, change: dict, event: dict) -> bool:
     if event.get("ignored"):
         return False
     profile = rule.get("profile")
-    if profile == "course-change":
+    if profile in {"course-change", "boya-course-change"}:
         from app.services.event_state import expired
         # No retrospective noise for lessons already over in both versions.
         versions = [value for value in (change.get("before"), change.get("after")) if value]
@@ -114,6 +116,9 @@ def change_matches(rule: dict, change: dict, event: dict) -> bool:
             return False
         return change["type"] == "course-change" and bool(set(change["categories"]) &
             set((rule.get("profile_settings") or {}).get("change_types", [])))
+    if profile in {"boya-new-course", "boya-seats", "boya-enrollment-open", "boya-enrollment-soon", "boya-enrollment-closing"}:
+        from app.services.boya import catalog_matches
+        return catalog_matches(rule, event, change)
     if profile in {"spoc-new-assignment", "judge-new-assignment"}:
         if change["type"] != "new-assignment":
             return False

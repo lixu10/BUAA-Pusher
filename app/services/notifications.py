@@ -43,6 +43,11 @@ class NotificationSender:
         self.vault = vault
 
     async def send(self, user_id: int, channel_type: str, channel_id: int | None, title: str, body: str, trigger_id: int | None = None) -> int:
+        if channel_type == "sms_webhook":
+            import re
+            entry = next((line for line in body.splitlines() if line.startswith("学校入口：")), "")
+            body = re.split(r"\n(?:正文摘要|简介|教师评语)：", body, maxsplit=1)[0]
+            body = body[:900] + (f"\n{entry}" if entry and entry not in body[:900] else "")
         status, error = "sent", ""
         try:
             if channel_type == "in_app":
@@ -121,6 +126,7 @@ class TriggerDispatcher:
         self.enforce_feature_scope = enforce_feature_scope
         self.attendance_checker = attendance_checker
         self.source_refresher = source_refresher
+        self.catalog_refresher = None
         self.active_groups: set[tuple[int, str]] = set()
         self.refresh_slots = asyncio.Semaphore(4)
 
@@ -132,7 +138,7 @@ class TriggerDispatcher:
             context = self.db.trigger_context(trigger["id"])
             if not context or context.get("status") != "queued":
                 continue
-            key = (trigger["user_id"], "signin" if context["definition"].get("profile") == "signin" else context["source"])
+            key = (trigger["user_id"], "signin" if context["definition"].get("profile") == "signin" else "bykc_catalog" if context["kind"] == "boya_catalog" else context["source"])
             if key not in self.active_groups:
                 groups.setdefault(key, []).append(trigger)
                 if sum(map(len, groups.values())) >= 50:
@@ -155,16 +161,25 @@ class TriggerDispatcher:
             if not context or context.get("status") != "queued":
                 continue
             signin = context["definition"].get("profile") == "signin"
+            catalog = context["kind"] == "boya_catalog"
+            if catalog and context.get("current_event") is None:
+                self.db.finish_trigger(trigger["id"], "cancelled", "目录课程已撤销")
+                processed += 1
+                continue
             # Quiet-hour deferrals require no network work until their actual
             # delivery time. Checkpoint attendance already has its own reader.
-            if self.source_refresher and not signin and context["rule_enabled"] and not context.get("ignored") and (
+            if (self.catalog_refresher if catalog else self.source_refresher) and not signin and context["rule_enabled"] and not context.get("ignored") and (
                 not self.enforce_feature_scope or (rule_available(context["definition"])
                     and (self.db.get_source(trigger["user_id"], context["source"]) or {}).get("enabled", True))
             ) and self._quiet_decision(trigger["user_id"], context["definition"].get("quiet_hours_policy", "delay")) is None:
                 if refreshed is None or (refreshed[0] and time.monotonic() - refreshed_at > 30):
                     try:
                         async with self.refresh_slots:
-                            refreshed = await self.source_refresher(trigger["user_id"], context["source"])
+                            if catalog:
+                                ids = sorted({str(item["metadata"]["course_id"]) for row in triggers if (item := self.db.trigger_context(row["id"])) and item.get("current_event")})
+                                refreshed = await self.catalog_refresher(trigger["user_id"], ids)
+                            else:
+                                refreshed = await self.source_refresher(trigger["user_id"], context["source"])
                     except Exception:
                         refreshed = (False, "通知前同步失败")
                     refreshed_at = time.monotonic()
@@ -193,6 +208,12 @@ class TriggerDispatcher:
             definition = context["definition"]
             signin = definition.get("profile") == "signin"
             change = context.get("change")
+            if catalog and definition.get("profile") == "boya-seats":
+                cooldown = (definition.get("profile_settings") or {}).get("cooldown_minutes", 15)
+                if cooldown and self.db.recent_boya_notice(trigger["user_id"], context["rule_id"], context["external_id"], context["change_id"], (datetime.now(UTC) - timedelta(minutes=cooldown)).isoformat()):
+                    self.db.finish_trigger(trigger["id"], "skipped", "名额变化通知间隔内")
+                    processed += 1
+                    continue
             matches = not event.get("ignored") if signin else change_matches(definition, change, event) if change else reminder_matches(definition, event)
             if not matches or (self.enforce_feature_scope and not in_academic_window(
                 event, academic_window(self.db.preferences(trigger["user_id"]))
@@ -258,7 +279,12 @@ class TriggerDispatcher:
                     continue
             try:
                 action = definition["actions"][trigger["action_index"]]
-                body = self._message_body(context, event)
+                context["network_mode"] = (self.db.get_source(trigger["user_id"], "iclass" if signin else event["source"]) or {}).get("network_mode", "direct")
+                if signin:
+                    latest = self.db.trigger_context(trigger["id"])
+                    if latest:
+                        event["metadata"] = latest["metadata"]
+                body = self._message_body(context, event, self.db.preferences(trigger["user_id"]).get("timezone", "Asia/Shanghai"))
                 await self.sender.send(
                     trigger["user_id"], action["channel"], action.get("channel_id"),
                     f"{context['title']}未签到" if signin else context["title"], body, trigger["id"],
@@ -297,6 +323,8 @@ class TriggerDispatcher:
     @staticmethod
     def _change_still_current(context):
         change, current = context["change"], context.get("current_event")
+        if (change.get("event") or {}).get("kind") == "boya_catalog":
+            return bool(current and (change["type"] != "boya-window" or current["metadata"].get(change["anchor_field"]) == change["anchor_time"]))
         if change["type"] == "course-change":
             after = change.get("after")
             return current is None if after is None else bool(current and course_fields(current) == course_fields(after))
@@ -310,67 +338,10 @@ class TriggerDispatcher:
         return True
 
     @staticmethod
-    def _message_body(context: dict[str, Any], event: dict[str, Any]) -> str:
-        if (context.get("definition") or {}).get("profile") == "signin":
-            return "\n".join(filter(None, ["查询结果：未签到", event.get("starts_at"), event.get("location"), context.get("rule_name")]))
-        change = context.get("change")
-        if change:
-            if change["type"] == "course-change":
-                left = course_fields(change.get("before") or {})
-                right = course_fields(change.get("after") or {})
-                lines = ["、".join(CHANGE_LABELS[key] for key in change["categories"])]
-                for key in change["categories"]:
-                    if key == "time":
-                        lines.append(f"原时间：{left['starts_at']} – {left['ends_at']}\n现时间：{right['starts_at']} – {right['ends_at']}")
-                    elif key in {"location", "teacher", "title"}:
-                        lines.append(f"{CHANGE_LABELS[key]}：{left[key] or '未提供'} → {right[key] or '未提供'}")
-                if not any(key in change["categories"] for key in ("time",)):
-                    lines.append(str(event.get("starts_at") or ""))
-                lines.append(context["rule_name"])
-                return "\n".join(lines)
-            if change["type"] == "assignment-grade":
-                meta = (change.get("after") or {}).get("metadata") or {}
-                old = (change.get("before") or {}).get("metadata") or {}
-                score = meta.get("earned_score")
-                parts = ["作业新评分" if not old.get("graded") else "作业评分更新"]
-                if score is not None:
-                    parts.append(f"得分：{score}" + (f" / {meta['max_score']}" if meta.get("max_score") is not None else ""))
-                if meta.get("grade_comment"):
-                    parts.append(f"评语：{meta['grade_comment']}")
-                if meta.get("graded_at"):
-                    parts.append(f"批阅时间：{meta['graded_at']}")
-                return "\n".join([*parts, context["rule_name"]])
-            return "新作业发布\n" + (f"截止：{event['due_at']}\n" if event.get("due_at") else "") + context["rule_name"]
-        metadata = event.get("metadata") or {}
-        parts: list[str] = []
-        if event.get("kind") == "grade" and metadata.get("score") is not None:
-            parts.append(f"成绩 {metadata['score']}")
-        elif event.get("kind") == "course":
-            parts.append("课程提醒")
-            if metadata.get("teacher"):
-                parts.append(str(metadata["teacher"]))
-        elif event.get("kind") == "signin":
-            parts.append("已签到" if event.get("status") == "done" else "尚未签到")
-        elif event.get("kind") == "assignment":
-            parts.append(public_event(event)["status_label"])
-            if metadata.get("total_problems"):
-                parts.append(f"提交进度 {metadata.get('submitted_count', 0)}/{metadata['total_problems']}")
-        elif event.get("kind") == "fitness":
-            current, target = metadata.get("current"), metadata.get("target")
-            if current is not None and target is not None:
-                parts.append(f"学期进度 {current}/{target}")
-            weekly_max = metadata.get("week_target")
-            if metadata.get("completion_impossible"):
-                parts.append("按剩余每周上限已无法达标")
-            elif metadata.get("must_max_every_week") and weekly_max:
-                parts.append(f"从本周起每周需完成 {weekly_max} 次")
-        if context.get("location"):
-            parts.append(str(context["location"]))
-        time_text = context.get("due_at") or context.get("starts_at") or context.get("ends_at")
-        if time_text:
-            parts.append(str(time_text))
-        parts.append(str(context["rule_name"]))
-        return " · ".join(parts)
+    def _message_body(context: dict[str, Any], event: dict[str, Any], timezone="Asia/Shanghai") -> str:
+        from app.services.notification_content import message_body
+        return message_body(context, event, timezone)
+
 
     def _quiet_decision(self, user_id: int, policy: str) -> str | datetime | None:
         if policy == "ignore":

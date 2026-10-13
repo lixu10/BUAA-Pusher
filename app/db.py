@@ -279,10 +279,25 @@ class Database:
                 columns = {row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})")}
                 if "refresh_attempts" not in columns:
                     self._connection.execute(f"ALTER TABLE {table} ADD COLUMN refresh_attempts INTEGER NOT NULL DEFAULT 0")
+            self._connection.executescript("""
+                CREATE TABLE IF NOT EXISTS boya_courses (
+                    user_id INTEGER NOT NULL REFERENCES puaa_users(id) ON DELETE CASCADE,
+                    course_id TEXT NOT NULL, event TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id,course_id));
+                CREATE TABLE IF NOT EXISTS boya_catalog_state (
+                    user_id INTEGER PRIMARY KEY REFERENCES puaa_users(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL DEFAULT 'not_connected', detail TEXT NOT NULL DEFAULT '',
+                    last_sync_at TEXT, refresh_interval_minutes INTEGER NOT NULL DEFAULT 5);
+            """)
+            if not self._one("SELECT name FROM schema_migrations WHERE name='boya-readonly-v1'", ()):
+                self._connection.execute("UPDATE user_sources SET enabled=0 WHERE id='bykc'")
+                self._connection.execute("INSERT INTO schema_migrations(name) VALUES('boya-readonly-v1')")
             preference_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(user_preferences)")}
             for name, definition in [("academic_filter_enabled", "INTEGER NOT NULL DEFAULT 1"),
                                      ("academic_start_date", "TEXT"), ("academic_end_date", "TEXT"),
-                                     ("auth_refresh_hours", "INTEGER NOT NULL DEFAULT 24")]:
+                                     ("auth_refresh_hours", "INTEGER NOT NULL DEFAULT 24"),
+                                     ("task_visible_kinds", "TEXT NOT NULL DEFAULT '[\"assignment\"]'"),
+                                     ("task_visible_sources", "TEXT NOT NULL DEFAULT '[\"spoc\",\"judge\",\"byxt\",\"bykc\"]'")]:
                 if name not in preference_columns:
                     self._connection.execute(f"ALTER TABLE user_preferences ADD COLUMN {name} {definition}")
             event_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(calendar_events)")}
@@ -493,7 +508,7 @@ class Database:
     def upsert_source(self, user_id: int, source: dict[str, Any]) -> None:
         default_intervals = {
             "iclass": 15, "grade": 15, "spoc": 30, "libbook": 30,
-            "byxt": 60, "judge": 60, "bykc": 60, "cgyy": 60, "ygdk": 360,
+            "byxt": 60, "judge": 60, "bykc": 30, "cgyy": 60, "ygdk": 360,
         }
         refresh_interval = int(source.get(
             "refresh_interval_minutes", default_intervals.get(source["id"], 60)
@@ -506,7 +521,7 @@ class Database:
                     label=excluded.label,status=excluded.status,detail=excluded.detail,
                     last_sync_at=excluded.last_sync_at,event_count=excluded.event_count""",
                 (user_id, source["id"], source["label"], source["status"], source.get("detail", ""),
-                 source.get("last_sync_at"), source.get("event_count", 0), refresh_interval, int(source.get("enabled", source["id"] != "iclass"))),
+                 source.get("last_sync_at"), source.get("event_count", 0), refresh_interval, int(source.get("enabled", source["id"] not in {"iclass", "bykc"}))),
             )
 
     def list_sources(self, user_id: int) -> list[dict[str, Any]]:
@@ -637,8 +652,12 @@ class Database:
             "user_id": user_id, "timezone": "Asia/Shanghai", "quiet_start": None, "quiet_end": None,
             "academic_filter_enabled": True, "academic_start_date": None, "academic_end_date": None,
             "auth_refresh_hours": 24,
+            "task_visible_kinds": '["assignment"]',
+            "task_visible_sources": '["spoc","judge","byxt","bykc"]',
         }
         row["academic_filter_enabled"] = bool(row["academic_filter_enabled"])
+        for key in ("task_visible_kinds", "task_visible_sources"):
+            row[key] = json.loads(row[key])
         return row
 
     def update_preferences(self, user_id: int, values: dict[str, Any]) -> dict[str, Any]:
@@ -646,11 +665,13 @@ class Database:
         with self._lock, self._connection:
             self._connection.execute(
                 """UPDATE user_preferences SET timezone=?,quiet_start=?,quiet_end=?,
-                   academic_filter_enabled=?,academic_start_date=?,academic_end_date=?,auth_refresh_hours=?,updated_at=?
+                   academic_filter_enabled=?,academic_start_date=?,academic_end_date=?,auth_refresh_hours=?,
+                   task_visible_kinds=?,task_visible_sources=?,updated_at=?
                    WHERE user_id=?""",
                 (values["timezone"], values.get("quiet_start"), values.get("quiet_end"),
                  int(values["academic_filter_enabled"]), values.get("academic_start_date"),
-                 values.get("academic_end_date"), values["auth_refresh_hours"], now_iso(), user_id),
+                 values.get("academic_end_date"), values["auth_refresh_hours"],
+                 json.dumps(values["task_visible_kinds"]), json.dumps(values["task_visible_sources"]), now_iso(), user_id),
             )
         return self.preferences(user_id)
 
@@ -786,17 +807,17 @@ class Database:
         row = self._one("SELECT events FROM sync_snapshots WHERE user_id=? AND source=?", (user_id, source))
         return json.loads(row["events"]) if row else None
 
-    def commit_sync_snapshot(self, user_id: int, source: str, events: dict, changes: list[dict], detected_at: str) -> None:
+    def commit_sync_snapshot(self, user_id: int, source: str, events: dict, changes: list[dict], detected_at: str, rule_source: str | None = None) -> None:
         from app.features import CHANGE_PROFILES, rule_available
         eligible = [rule["id"] for rule in self.list_automation_rules(user_id)
                     if rule["enabled"] and rule.get("profile") in CHANGE_PROFILES and rule_available(rule)
-                    and source in rule["scope"]["sources"]]
+                    and (rule_source or source) in rule["scope"]["sources"]]
         with self._lock, self._connection:
             for change in changes:
                 recipients = [] if change["event"].get("ignored") else eligible
                 self._connection.execute(
                     "INSERT INTO sync_changes(user_id,source,external_id,payload,eligible_rules,detected_at) VALUES(?,?,?,?,?,?)",
-                    (user_id, source, change["event"]["external_id"], json.dumps(change, ensure_ascii=False),
+                    (user_id, rule_source or source, change["event"]["external_id"], json.dumps(change, ensure_ascii=False),
                      json.dumps(recipients), detected_at))
             self._connection.execute(
                 "INSERT INTO sync_snapshots(user_id,source,events,updated_at) VALUES(?,?,?,?) "
@@ -809,6 +830,74 @@ class Database:
             row["payload"] = json.loads(row["payload"])
             row["eligible_rules"] = json.loads(row["eligible_rules"])
         return rows
+
+    def boya_state(self, user_id: int) -> dict:
+        return self._one("SELECT * FROM boya_catalog_state WHERE user_id=?", (user_id,)) or {
+            "status": "not_connected", "detail": "", "last_sync_at": None, "refresh_interval_minutes": 5}
+
+    def update_boya_state(self, user_id: int, **values) -> None:
+        state = {**self.boya_state(user_id), **values}
+        with self._lock, self._connection:
+            self._connection.execute("INSERT INTO boya_catalog_state VALUES(?,?,?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET status=excluded.status,detail=excluded.detail,last_sync_at=excluded.last_sync_at,refresh_interval_minutes=excluded.refresh_interval_minutes",
+                (user_id, state["status"], state["detail"][:160], state["last_sync_at"], state["refresh_interval_minutes"]))
+
+    def boya_course(self, user_id: int, course_id: str) -> dict | None:
+        row = self._one("SELECT event FROM boya_courses WHERE user_id=? AND course_id=?", (user_id, str(course_id)))
+        return json.loads(row["event"]) if row else None
+
+    def list_boya_courses(self, user_id: int) -> list[dict]:
+        return [json.loads(row["event"]) for row in self._rows("SELECT event FROM boya_courses WHERE user_id=? ORDER BY course_id", (user_id,))]
+
+    def save_boya_course(self, user_id: int, event: dict) -> None:
+        with self._lock, self._connection:
+            self._connection.execute("INSERT INTO boya_courses VALUES(?,?,?,?) "
+                "ON CONFLICT(user_id,course_id) DO UPDATE SET event=excluded.event,updated_at=excluded.updated_at",
+                (user_id, str(event["metadata"]["course_id"]), json.dumps(event, ensure_ascii=False), now_iso()))
+
+    def replace_boya_catalog(self, user_id: int, courses: list[dict]) -> None:
+        with self._lock, self._connection:
+            self._connection.execute("DELETE FROM boya_courses WHERE user_id=?", (user_id,))
+            self._connection.executemany("INSERT INTO boya_courses VALUES(?,?,?,?)", [
+                (user_id, str(event["metadata"]["course_id"]), json.dumps(event, ensure_ascii=False), now_iso()) for event in courses])
+
+    def refresh_boya_selection(self, user_id: int, keep_confirmed: bool = False) -> None:
+        ids = {str(e["metadata"].get("course_id")) for e in self.list_events(user_id, limit=5000) if e["source"] == "bykc" and e["kind"] == "boya"}
+        for event in self.list_boya_courses(user_id):
+            event["metadata"]["selected"] = str(event["metadata"]["course_id"]) in ids or (keep_confirmed and event["metadata"].get("selected") is True)
+            self.save_boya_course(user_id, event)
+
+    def queued_catalog_keys(self, user_id: int, rule_id: int) -> set[str]:
+        return {row["dedupe_key"] for row in self._rows("SELECT dedupe_key FROM change_triggers WHERE user_id=? AND rule_id=? AND status='queued' AND dedupe_key LIKE 'catalog:%'", (user_id, rule_id))}
+
+    def queue_catalog_trigger(self, user_id, rule_id, payload, action_index, run_at, key) -> int:
+        stamp, event = now_iso(), payload["event"]
+        with self._lock, self._connection:
+            existing = self._one("SELECT id,status,detail FROM change_triggers WHERE user_id=? AND dedupe_key=?", (user_id, key))
+            if existing:
+                # A temporarily full/disabled course may become eligible again.
+                # Restore only future cancelled plans; never replay sent work.
+                if run_at > stamp and existing["status"] == "cancelled" and existing["detail"] in {
+                    "报名时间、课程或规则已改变", "博雅连接已停用", "规则已停用"}:
+                    self._connection.execute("UPDATE change_triggers SET status='queued',detail='',processed_at=NULL,attempts=0,refresh_attempts=0,run_at=? WHERE id=? AND user_id=?",
+                        (run_at, existing["id"], user_id))
+                    return 1
+                return 0
+            change = self._connection.execute("INSERT INTO sync_changes(user_id,source,external_id,payload,eligible_rules,detected_at) VALUES(?,?,?,?,?,?)",
+                (user_id, "bykc", event["external_id"], json.dumps(payload, ensure_ascii=False), json.dumps([rule_id]), stamp)).lastrowid
+            self._connection.execute("INSERT INTO change_triggers(user_id,rule_id,change_id,action_index,run_at,created_at,dedupe_key) VALUES(?,?,?,?,?,?,?)",
+                (user_id, rule_id, change, action_index, run_at, stamp, key))
+        return 1
+
+    def cancel_catalog_plans(self, user_id, rule_id, desired: set[str]) -> None:
+        for row in self._rows("SELECT id,dedupe_key FROM change_triggers WHERE user_id=? AND rule_id=? AND status='queued' AND dedupe_key LIKE 'catalog:%'", (user_id, rule_id)):
+            if row["dedupe_key"] not in desired:
+                self.finish_trigger(-row["id"], "cancelled", "报名时间、课程或规则已改变")
+
+    def recent_boya_notice(self, user_id, rule_id, external_id, change_id, since) -> bool:
+        return bool(self._one("SELECT d.id FROM notification_deliveries_v2 d JOIN change_triggers t ON t.id=d.change_trigger_id "
+            "JOIN sync_changes c ON c.id=t.change_id WHERE d.user_id=? AND t.rule_id=? AND c.external_id=? AND t.change_id<>? AND d.status='sent' AND d.sent_at>=? LIMIT 1",
+            (user_id, rule_id, external_id, change_id, since)))
 
     def queue_change_trigger(self, user_id: int, rule_id: int, change_id: int, action_index: int, run_at: str) -> int:
         with self._lock, self._connection:
@@ -908,18 +997,19 @@ class Database:
                 return None
             payload = json.loads(row.pop("payload"))
             event = payload["event"]
-            current = self.event_by_key(row["user_id"], row["source"], row["external_id"])
+            current = self.boya_course(row["user_id"], event["metadata"]["course_id"]) if event.get("kind") == "boya_catalog" else self.event_by_key(row["user_id"], row["source"], row["external_id"])
             display_event = current or event
             row.update({key: display_event.get(key) for key in ("title", "kind", "starts_at", "ends_at", "due_at", "location")})
             row.update(id=trigger_id, event_status=(current or event).get("status", "unknown"),
                        ignored=(current or event).get("ignored", False),
                        metadata=(current or event).get("metadata", {}), change=payload,
                        definition=json.loads(row["definition"]), current_event=current)
+            row["event_updated_at"] = (current or event).get("updated_at") or payload.get("detected_at") or row.get("detected_at")
             return row
         row = self._one(
             """SELECT t.*,r.name AS rule_name,r.definition,r.enabled AS rule_enabled,
                       e.title,e.kind,e.source,e.starts_at,e.ends_at,e.due_at,e.status AS event_status,
-                      e.location,e.metadata,e.ignored
+                      e.location,e.metadata,e.ignored,e.updated_at AS event_updated_at
                FROM scheduled_triggers t JOIN automation_rules r ON r.id=t.rule_id
                JOIN calendar_events e ON e.id=t.event_id WHERE t.id=?""", (trigger_id,)
         )

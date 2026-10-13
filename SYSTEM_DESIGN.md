@@ -27,6 +27,7 @@ PUAA Reminder 是一个多用户校园日程与提醒平台。用户先登录 PU
 - [交互设计](docs/UX_DESIGN.md)：信息架构、页面设计和视觉规范
 - [API 调研](docs/API_RESEARCH.md)：学校接口与认证链路证据
 - [交付计划](docs/DELIVERY_PLAN.md)：实现顺序、质量门槛和验收标准
+- [博雅课程设计](docs/BOYA_DESIGN.md)：只读目录、已报名日程、抢课提醒与发送前复核
 
 ## 设计门结论
 

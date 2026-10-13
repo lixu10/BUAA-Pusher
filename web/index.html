@@ -8,7 +8,7 @@
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://cdn.jsdelivr.net">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-  <link rel="stylesheet" href="/styles.css?v=20261012-2">
+  <link rel="stylesheet" href="/styles.css?v=20261013-2">
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
@@ -40,6 +40,7 @@
         <a class="nav-item active" href="#today" data-page="today"><i class="bi bi-sun"></i><span>今日</span></a>
         <a class="nav-item" href="#calendar" data-page="calendar"><i class="bi bi-calendar3"></i><span>日历</span></a>
         <a class="nav-item" href="#tasks" data-page="tasks"><i class="bi bi-list-check"></i><span>待办</span></a>
+        <a class="nav-item" href="#boya" data-page="boya"><i class="bi bi-compass"></i><span>博雅</span></a>
         <a class="nav-item" href="#alerts" data-page="alerts"><i class="bi bi-bell"></i><span>提醒</span></a>
         <a class="nav-item" href="#connections" data-page="connections"><i class="bi bi-plug"></i><span>连接</span></a>
         <a class="nav-item" href="#channels" data-page="channels"><i class="bi bi-send"></i><span>通知渠道</span></a>
@@ -83,10 +84,10 @@
       </section>
 
       <section class="page" id="page-tasks">
-        <div class="page-heading"><h2>待办</h2><span id="task-count"></span></div>
+        <div class="page-heading"><h2>待办</h2><div class="heading-actions"><span id="task-count"></span><button class="quiet-button" id="task-display-settings"><i class="bi bi-sliders"></i>显示设置</button></div></div>
         <div class="task-tools">
           <div class="view-tabs"><button data-task-status="incomplete" class="active">待处理</button><button data-task-status="any">全部</button><button data-task-status="submitted">已提交</button><button data-task-status="partial">部分提交</button><button data-task-status="unknown">状态未知</button><button data-task-status="ignored">已忽略</button></div>
-          <select id="task-source" aria-label="待办来源"><option value="">全部来源</option><option value="spoc">SPOC</option><option value="judge">JUDGE</option><option value="byxt">课程提醒</option></select>
+          <select id="task-source" aria-label="待办来源"><option value="">全部来源</option><option value="spoc">SPOC</option><option value="judge">JUDGE</option><option value="byxt">课程提醒</option><option value="bykc">博雅课程</option></select>
           <select id="task-type" aria-label="作业类型"><option value="">全部类型</option></select>
           <label class="check-row"><input type="checkbox" id="task-history"><span>显示已过期</span></label>
         </div>
@@ -101,6 +102,15 @@
         <div class="alert-panel" data-alert-panel="triggers"><div class="list-surface" id="trigger-list"></div></div>
         <div class="alert-panel" data-alert-panel="deliveries"><div class="list-surface" id="delivery-list"></div></div>
         <div class="alert-panel" data-alert-panel="inbox"><div class="list-surface" id="inbox-list"></div></div>
+      </section>
+
+      <section class="page" id="page-boya">
+        <div class="page-heading"><h2>博雅课程</h2><span id="boya-count"></span></div>
+        <div class="boya-toolbar"><div class="view-tabs"><button type="button" data-boya-tab="chosen" class="active">已报名</button><button type="button" data-boya-tab="catalog">课程列表</button></div><span id="boya-status"></span><button class="quiet-button" type="button" id="boya-sync"><i class="bi bi-arrow-repeat"></i>同步已报名</button></div>
+        <div class="boya-controls"><label class="check-row" id="boya-history-row"><input type="checkbox" id="boya-history"><span>显示已结束</span></label><label class="boya-interval">目录刷新<select id="boya-catalog-interval" aria-label="博雅目录刷新间隔"></select></label></div>
+        <div class="boya-filters" id="boya-filters" hidden><input type="search" id="boya-search" placeholder="搜索课程名称" aria-label="搜索博雅课程"><select id="boya-category" aria-label="课程分类"></select><select id="boya-campus" aria-label="适用校区"></select><select id="boya-sign-type" aria-label="签到方式"></select><select id="boya-filter-state" aria-label="报名状态"><option value="">全部状态</option><option value="available">可报名</option><option value="preview">未开放</option><option value="full">已满</option><option value="selected">已报名</option><option value="closed">报名结束</option><option value="ended">已结束</option><option value="unknown">状态未知</option></select></div>
+        <div class="list-surface" id="boya-list"></div>
+        <div class="boya-pager" id="boya-pager" hidden><button type="button" class="quiet-button" id="boya-page-prev" aria-label="上一页"><i class="bi bi-chevron-left"></i></button><span id="boya-page-number"></span><button type="button" class="quiet-button" id="boya-page-next" aria-label="下一页"><i class="bi bi-chevron-right"></i></button></div>
       </section>
 
       <section class="page" id="page-channels">
@@ -119,6 +129,11 @@
         <div class="account-panel"><div><strong id="account-name"></strong><span id="account-email"></span></div><button class="danger-button" id="logout-button">退出登录</button></div>
         <form class="preferences-panel" id="preferences-form"><div><strong>安静时段</strong><span>规则可选择延后、跳过或忽略</span></div><label>开始<input type="time" name="quiet_start"></label><label>结束<input type="time" name="quiet_end"></label><button class="quiet-button" type="submit">保存</button></form>
         <form class="preferences-panel" id="auth-refresh-form"><div><strong>学校认证刷新</strong><span>需记住学校密码</span></div><label>间隔（小时）<input type="number" name="auth_refresh_hours" min="1" max="720" step="1" value="24" required></label><button class="quiet-button" type="submit">保存</button></form>
+        <form class="task-visibility-panel" id="task-visibility-form">
+          <div class="settings-title"><div><strong>待办显示</strong><small>仅影响待办，不影响日程与提醒</small></div><button class="quiet-button" type="submit">保存</button></div>
+          <fieldset><legend>事项类型</legend><div class="choice-grid"><label><input type="checkbox" name="task_visible_kinds" value="assignment">作业</label><label><input type="checkbox" name="task_visible_kinds" value="course">教务课程</label><label><input type="checkbox" name="task_visible_kinds" value="boya">博雅课程</label></div></fieldset>
+          <fieldset><legend>来源</legend><div class="choice-grid"><label><input type="checkbox" name="task_visible_sources" value="spoc">SPOC</label><label><input type="checkbox" name="task_visible_sources" value="judge">JUDGE</label><label><input type="checkbox" name="task_visible_sources" value="byxt">教务</label><label><input type="checkbox" name="task_visible_sources" value="bykc">博雅</label></div></fieldset>
+        </form>
         <h3 class="settings-heading">学期范围</h3>
         <form id="academic-form" class="academic-tools">
           <label class="check-row"><input type="checkbox" name="academic_filter_enabled" checked><span>学期过滤</span></label>
@@ -164,7 +179,7 @@
       <div class="dialog-head"><h2 id="rule-dialog-title">新建提醒</h2><button class="icon-button" type="button" data-close="rule-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div>
       <div class="rule-editor-body">
       <div class="rule-identity">
-        <label class="rule-field"><span>连接</span><select name="connection" id="rule-connection"><option value="byxt">课程提醒</option><option value="iclass">课程签到</option><option value="spoc" selected>SPOC 作业</option><option value="judge">JUDGE 作业</option><option value="assignments" hidden>SPOC + JUDGE（旧规则）</option><option disabled>图书馆 · Coming Soon</option><option disabled>其他连接 · Coming Soon</option></select></label>
+        <label class="rule-field"><span>连接</span><select name="connection" id="rule-connection"><option value="byxt">课程提醒</option><option value="iclass">课程签到</option><option value="spoc" selected>SPOC 作业</option><option value="judge">JUDGE 作业</option><option value="bykc">博雅课程</option><option value="assignments" hidden>SPOC + JUDGE（旧规则）</option><option disabled>图书馆 · Coming Soon</option><option disabled>其他连接 · Coming Soon</option></select></label>
         <label class="rule-field"><span>规则类型</span><select name="profile" id="rule-profile"></select></label>
         <label class="rule-field"><span>名称</span><input name="name" required maxlength="80" autocomplete="off"></label>
       </div>
@@ -191,6 +206,7 @@
     <div class="calendar-detail-sheet"><div class="dialog-head"><h2 id="calendar-detail-title"></h2><button type="button" class="icon-button" data-close="calendar-detail-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div><div id="calendar-detail-body"></div></div>
   </dialog>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=20261012-2" defer></script>
+  <script src="/boya.js?v=20261013-2" defer></script>
+  <script src="/app.js?v=20261013-2" defer></script>
 </body>
 </html>

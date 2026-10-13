@@ -2,16 +2,21 @@
 from typing import Any
 
 SCHOOL_SOURCES = frozenset({"spoc", "byxt", "judge", "iclass", "grade", "bykc", "cgyy", "ygdk", "libbook"})
-ACTIVE_SOURCES = frozenset({"spoc", "byxt", "judge", "iclass"})
-ACTIVE_KINDS = frozenset({"assignment", "course"})
+ACTIVE_SOURCES = frozenset({"spoc", "byxt", "judge", "iclass", "bykc"})
+ACTIVE_KINDS = frozenset({"assignment", "course", "boya"})
+CATALOG_TIMED_PROFILES = frozenset({"boya-enrollment-open", "boya-enrollment-soon", "boya-enrollment-closing"})
+CATALOG_PROFILES = CATALOG_TIMED_PROFILES | {"boya-new-course", "boya-seats"}
 CHANGE_PROFILES = {"course-change": ("byxt", "course"),
                    "spoc-new-assignment": ("spoc", "assignment"),
                    "judge-new-assignment": ("judge", "assignment"),
-                   "spoc-assignment-grade": ("spoc", "assignment")}
-ACTIVE_PROFILES = frozenset({"assignment", "course", "signin", "spoc-assignment", "judge-assignment", *CHANGE_PROFILES})
+                   "spoc-assignment-grade": ("spoc", "assignment"),
+                   "boya-course-change": ("bykc", "boya"), "boya-new-course": ("bykc", "boya_catalog"), "boya-seats": ("bykc", "boya_catalog")}
+ACTIVE_PROFILES = frozenset({"assignment", "course", "signin", "spoc-assignment", "judge-assignment", "boya-course", *CATALOG_PROFILES, *CHANGE_PROFILES})
 
 
 def event_available(event: dict[str, Any]) -> bool:
+    if event.get("source") == "bykc":
+        return event.get("kind") in {"boya", "boya_catalog"}
     expected = "course" if event.get("source") == "byxt" else "assignment"
     return event.get("source") in ACTIVE_SOURCES and event.get("kind") == expected
 
@@ -25,7 +30,8 @@ def rule_available(rule: dict[str, Any]) -> bool:
     if "iclass" in sources or "signin" in kinds:
         return False  # Old polling/escalation rules require explicit reconfiguration.
     scopes = {**CHANGE_PROFILES, "course": ("byxt", "course"),
-              "spoc-assignment": ("spoc", "assignment"), "judge-assignment": ("judge", "assignment")}
+              "spoc-assignment": ("spoc", "assignment"), "judge-assignment": ("judge", "assignment"),
+              "boya-course": ("bykc", "boya"), **{key: ("bykc", "boya_catalog") for key in CATALOG_TIMED_PROFILES}}
     if profile in scopes:
         source, kind = scopes[profile]
         return sources == {source} and kinds == {kind}

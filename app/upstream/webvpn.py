@@ -26,7 +26,7 @@ READ_POST_PATHS = {
     "app.buaa.edu.cn": {"/buaascore/wap/default/index"},
     "booking.lib.buaa.edu.cn": {"/v4/login/user", "/v4/member/seat"},
     "ygdk.buaa.edu.cn": {"/api/Front/Clockin/Classify/getList", "/api/Front/Clockin/Clockin/getCount", "/api/Front/Clockin/Term/get"},
-    "bykc.buaa.edu.cn": {"/sscv/getAllConfig", "/sscv/queryChosenCourse"},
+    "bykc.buaa.edu.cn": {"/sscv/getAllConfig", "/sscv/queryChosenCourse", "/sscv/queryStudentSemesterCourseByPage", "/sscv/queryCourseById"},
     "cgyy.buaa.edu.cn": {"/venue-zhjs-server/api/login"},
 }
 HOST_KEY = b"wrdvpnisthebest!"
