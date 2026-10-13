@@ -213,6 +213,28 @@ def start_sync(user_id: int, source_ids: set[str]) -> dict[str, asyncio.Task]:
     return tasks
 
 
+async def refresh_notification_source(user_id: int, source_id: str) -> tuple[bool, str]:
+    if source_id not in ACTIVE_SOURCES or source_id == "iclass":
+        return False, "通知来源不可用"
+    tasks = start_sync(user_id, {source_id})
+    task = tasks.get(source_id)
+    if task is None:
+        return False, "连接已停用"
+    try:
+        # A concurrent manual/automatic sync is shared. Cancelling dispatch
+        # must not cancel that user's independently requested sync.
+        await asyncio.shield(task)
+    except Exception:
+        return False, "通知前同步失败"
+    source = db.get_source(user_id, source_id) or {}
+    if source.get("status") != "healthy":
+        return False, "来源同步不完整" if source.get("status") == "degraded" else "来源同步失败，请检查连接"
+    return True, ""
+
+
+dispatcher.source_refresher = refresh_notification_source
+
+
 async def sync_one(user_id: int, source_id: str) -> int:
     # Enforce the boundary even for internal/direct calls, before SSO access.
     if source_id not in ACTIVE_SOURCES:

@@ -14,6 +14,7 @@ from app.upstream.sso import AuthenticationRequired, BuaaSsoSession
 from app.upstream.webvpn import from_webvpn_url, resolve_upstream_redirect
 
 from .base import ConnectorManifest, SourceAdapter
+from .text import plain_text
 
 
 BASE = "https://spoc.buaa.edu.cn/spocnewht"
@@ -105,6 +106,8 @@ class SpocAdapter(SourceAdapter):
                     detail = await self._get_object(DETAIL_URL, {"id": assignment_id})
                     submission = await self._get_object(SUBMISSION_URL, {"kczyid": assignment_id})
                     if detail:
+                        if "zynr" in detail:
+                            event["metadata"]["description"] = plain_text(detail.get("zynr"))
                         event["due_at"] = self._date_time(detail.get("zyjzsj")) or event["due_at"]
                         event["metadata"]["opens_at"] = self._date_time(detail.get("zykssj")) or event["metadata"]["opens_at"]
                         event["metadata"]["max_score"] = detail.get("zyfs")
@@ -149,8 +152,7 @@ class SpocAdapter(SourceAdapter):
     def _plain_text(value: Any) -> str | None:
         if value is None:
             return None
-        from html import unescape
-        return unescape(re.sub(r"<[^>]+>", " ", str(value))).strip() or None
+        return plain_text(str(value))
 
     async def _get_object(self, url: str, params: dict[str, str]) -> dict[str, Any] | None:
         response = await self.session.client.get(url, params=params, headers={
@@ -317,6 +319,7 @@ class SpocAdapter(SourceAdapter):
                 "submitted": submitted, "max_score": item.get("mf"),
                 "submission_status": status, "assignment_type": str(item.get("zylx") or ""),
                 "course_name": course, "status_source": "assignment_list",
+                "description": plain_text(item.get("zynr")),
             },
         }
 

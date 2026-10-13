@@ -11,6 +11,7 @@ from app.upstream.webvpn import from_webvpn_url, GATEWAY
 from app.services.academic import in_academic_window
 
 from .base import ConnectorManifest, SourceAdapter
+from .text import plain_text
 
 
 BASE = "https://judge.buaa.edu.cn"
@@ -183,18 +184,24 @@ class JudgeAdapter(SourceAdapter):
             text,
         )
         problem_states = []
+        problems = []
         for cells in parser.rows:
             if len(cells) >= 4 and re.fullmatch(r"\d+(?:\.\d+)?", cells[2]):
                 status_text = " ".join(cells[3:])
+                name, points = cells[1], cells[2]
             elif len(cells) == 2 and re.fullmatch(r"\d+\.?", cells[0]):
                 status_text = cells[1]
+                name, points = f"第{cells[0].rstrip('.')}题", None
             else:
                 continue
             detected = self._submission_evidence(status_text)
+            problems.append({"title": name, "max_score": points,
+                "earned_score": self._match(status_text, r"得分[：:]\s*([\d.]+)"),
+                "submission_status": detected or "unknown"})
             if detected:
                 problem_states.append(detected)
         declared_total = int(self._match(text, r"共\s*(\d+)\s*道") or 0)
-        total = declared_total or len(problem_states)
+        total = declared_total or len(problems)
         submitted_count = sum(state == "submitted" for state in problem_states)
         if total:
             if not problem_states:
@@ -226,6 +233,7 @@ class JudgeAdapter(SourceAdapter):
                 "submission_status": state, "submitted_count": submitted_count,
                 "total_problems": total, "assignment_type": type_text or "",
                 "status_source": "assignment_detail",
+                "description": plain_text(html), "problems": problems,
             },
         }
 

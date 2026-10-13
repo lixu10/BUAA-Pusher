@@ -103,6 +103,32 @@ class AttendanceTest(unittest.IsolatedAsyncioTestCase):
         await self.dispatcher.dispatch_due()
         self.query.assert_awaited_once(); self.assertEqual(2,self.sender.send.await_count)
 
+    async def test_later_retry_rechecks_missing_and_cancels_after_signing(self):
+        self.create(); self.engine.plan_user(self.uid, self.now)
+        self.query.return_value = [self.record()]
+        self.sender.send.side_effect = RuntimeError("send failed")
+        await self.dispatcher.dispatch_due()
+        trigger = self.db.list_triggers(self.uid)[0]
+        self.db.reschedule_trigger(trigger["id"], datetime.now(UTC).isoformat(), "later retry")
+        self.engine.plan_user(self.uid, self.now + timedelta(minutes=2))
+        self.query.return_value = [self.record("done")]
+        await self.dispatcher.dispatch_due()
+        self.assertEqual(2, self.query.await_count)
+        self.assertEqual(1, self.sender.send.await_count)
+        self.assertEqual("cancelled", self.db.list_triggers(self.uid)[0]["status"])
+
+    async def test_quiet_delay_queries_at_delivery_instead_of_at_original_point(self):
+        self.create(); self.engine.plan_user(self.uid, self.now)
+        with patch.object(self.dispatcher, "_quiet_decision", return_value=self.now + timedelta(minutes=2)):
+            await self.dispatcher.dispatch_due()
+        self.query.assert_not_awaited()
+        trigger = self.db.list_triggers(self.uid)[0]
+        self.db.reschedule_trigger(trigger["id"], datetime.now(UTC).isoformat(), "quiet ended")
+        self.query.return_value = [self.record("done")]
+        await self.dispatcher.dispatch_due()
+        self.query.assert_awaited_once()
+        self.sender.send.assert_not_awaited()
+
     async def test_disable_or_ignore_during_query_blocks_delivery(self):
         self.create(); self.engine.plan_user(self.uid,self.now)
         async def disable(*args):

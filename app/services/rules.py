@@ -67,6 +67,7 @@ class RuleEngine:
                                                                  action_index, run_at.isoformat())
                 continue
             planned: list[dict[str, Any]] = []
+            queued_keys = self.db.queued_trigger_keys(user_id, rule["id"])
             for event in events:
                 if not self.matches_scope(rule["scope"], event):
                     continue
@@ -92,13 +93,17 @@ class RuleEngine:
                                 deadline = self.parse_time(event.get("due_at"))
                                 if deadline and run_at >= deadline:
                                     continue
-                            if run_at < now - timedelta(minutes=5):
-                                continue
                             raw_key = f"{user_id}:{rule['id']}:{event['id']}:{trigger_index}:{action_index}:{occurrence}:{run_at.isoformat()}"
+                            dedupe_key = hashlib.sha256(raw_key.encode()).hexdigest()
+                            # Syncing before delivery replans the queue. Preserve
+                            # already queued quiet-hour/refresh/send retries while
+                            # their current event and rule still match.
+                            if run_at < now - timedelta(minutes=5) and dedupe_key not in queued_keys:
+                                continue
                             planned.append({
                                 "event_id": event["id"], "action_index": action_index,
                                 "occurrence": occurrence, "run_at": run_at.isoformat(),
-                                "dedupe_key": hashlib.sha256(raw_key.encode()).hexdigest(),
+                                "dedupe_key": dedupe_key,
                             })
             inserted += self.db.replace_triggers_for_rule(user_id, rule["id"], planned)
         return inserted

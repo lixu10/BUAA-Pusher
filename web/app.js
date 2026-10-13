@@ -147,8 +147,9 @@ function renderToday() {
     state.taskStatus = "incomplete"; state.taskSource = ""; state.taskType = ""; state.taskHistory = false;
     $("#task-source").value = ""; $("#task-history").checked = false; renderTasks(); navigate("tasks");
   }));
-  $("#today-timeline").innerHTML = events.length ? events.map((event) => `<article class="timeline-row"><time>${eventTimeRange(event)}</time><span class="timeline-dot"></span><div class="timeline-main"><strong>${esc(event.title)}</strong><span>${esc(sourceLabel(event.source))}${eventDetails(event) ? ` · ${esc(eventDetails(event))}` : ""}</span>${statusBadge(event)}</div></article>`).join("") : empty("今天没有待处理事项", "后续安排可在日历查看", "bi-check2-circle");
-  $("#deadline-list").innerHTML = deadlines.slice(0,5).map((event) => `<div class="deadline-item"><strong>${esc(event.title)}</strong><span>${fmtDate(dateOf(event.due_at), { year:"numeric", month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" })} · ${esc(statusLabel(event))}</span></div>`).join("") || `<div class="empty"><i class="bi bi-check2"></i><p>7 天内没有截止作业</p></div>`;
+  $("#today-timeline").innerHTML = events.length ? events.map((event) => `<article class="timeline-row"><time>${eventTimeRange(event)}</time><span class="timeline-dot"></span><div class="timeline-main"><button type="button" class="event-detail-link" data-calendar-event="${event.id}">${esc(event.title)}</button><span>${esc(sourceLabel(event.source))}${eventDetails(event) ? ` · ${esc(eventDetails(event))}` : ""}</span>${statusBadge(event)}</div></article>`).join("") : empty("今天没有待处理事项", "后续安排可在日历查看", "bi-check2-circle");
+  $("#deadline-list").innerHTML = deadlines.slice(0,5).map((event) => `<div class="deadline-item"><button type="button" class="event-detail-link" data-calendar-event="${event.id}">${esc(event.title)}</button><span>${fmtDate(dateOf(event.due_at), { year:"numeric", month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" })} · ${esc(statusLabel(event))}</span></div>`).join("") || `<div class="empty"><i class="bi bi-check2"></i><p>7 天内没有截止作业</p></div>`;
+  bindEventDetails("#page-today");
 }
 
 function eventsForDay(date) { return visibleCalendarEvents().filter((event) => sameDay(eventDate(event), date)); }
@@ -202,7 +203,9 @@ function renderWeek() {
   const columns = days.map((day) => {
     const items = weekDayLayout(day).map(({event,top,height,lane,lanes,continued}) => {
       const details = eventDetails(event);
-      return `<button type="button" class="calendar-event" data-calendar-event="${event.id}" title="${esc(event.title)}" style="top:${top}px;height:${height}px;left:calc(${lane / lanes * 100}% + 4px);width:calc(${100 / lanes}% - 8px)"><strong>${esc(event.title)}</strong><span>${eventTimeRange(event)}${continued ? " · 跨日" : ""}</span><span>${esc(statusLabel(event))}</span>${details ? `<span>${esc(details)}</span>` : ""}</button>`;
+      const density = height < 74 ? "compact" : height < 94 ? "medium" : "full";
+      const tooltip = [event.title, eventTimeRange(event), details, statusLabel(event), attendanceLabel(event)].filter(Boolean).join("\n");
+      return `<button type="button" class="calendar-event ${density}" data-calendar-event="${event.id}" title="${esc(tooltip)}" aria-label="${esc(tooltip)}" style="top:${top}px;height:${height}px;left:calc(${lane / lanes * 100}% + 4px);width:calc(${100 / lanes}% - 8px)"><strong>${esc(event.title)}</strong><span class="calendar-event-time">${eventTimeRange(event)}${continued ? " · 跨日" : ""}</span>${details ? `<span class="calendar-event-meta">${esc(details)}</span>` : ""}<span class="calendar-event-status">${esc(statusLabel(event))}${attendanceLabel(event) ? ` · ${esc(attendanceLabel(event))}` : ""}</span></button>`;
     }).join("");
     const current = sameDay(day, now) ? `<div class="week-now" style="top:${(now.getHours() + now.getMinutes()/60) * WEEK_HOUR_HEIGHT}px" aria-label="当前时间 ${fmtTime(now)}"></div>` : "";
     return `<div class="day-column">${items}${current}</div>`;
@@ -210,31 +213,68 @@ function renderWeek() {
   return `<div class="week-sticky"><div class="week-head"><span>时间</span>${heads}</div><div class="week-pinned"><span class="week-pinned-label">截止<br>／全天</span>${pinned}</div></div><div class="week-body"><div class="time-axis">${axis}</div>${columns}</div>`;
 }
 
+function bindEventDetails(container) {
+  $$(`${container} [data-calendar-event]`).forEach((button) => button.addEventListener("click", () => openCalendarDetail(button.dataset.calendarEvent)));
+}
+
+function detailFields(fields) {
+  return fields.filter(([,value]) => value !== null && value !== undefined && value !== "").map(([label,value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("");
+}
+function detailDate(value) { const date = dateOf(value); return date ? fmtDate(date, {year:"numeric",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"}) : null; }
+function detailDisclosure(label, content) { return content ? `<details class="event-disclosure"><summary>${esc(label)}</summary>${content}</details>` : ""; }
+
+function renderEventDetail(event) {
+  const meta = event.metadata || {}, date = weekPinnedDate(event) || eventDate(event);
+  const fields = [["来源", sourceLabel(event.source)], ["日期", date ? fmtDate(date, {year:"numeric",month:"long",day:"numeric",weekday:"long"}) : "时间未知"], [event.kind === "assignment" ? "截止" : "时间", eventTimeRange(event)], ["状态", statusLabel(event)], ["教师", eventTeacher(event)], ["教室", event.location], ["签到", attendanceLabel(event) || null]];
+  let extra = "";
+  if (event.kind === "assignment") {
+    fields.push(["开放", detailDate(meta.opens_at)], ["提交", detailDate(meta.submitted_at)], ["类型", meta.assignment_type ? assignmentTypeLabel(meta.assignment_type) : null]);
+    const score = event.source === "spoc" ? meta.earned_score : meta.earned_score ?? meta.score;
+    fields.push(["得分", score], ["满分", meta.max_score], ["批阅", event.source === "spoc" ? (meta.graded ? "教师已批阅" : meta.grading_status === "3" ? "互评" : meta.grading_known ? "待批阅" : "未知") : null], ["批阅时间", detailDate(meta.graded_at)]);
+    if (meta.total_problems) fields.push(["提交进度", `${meta.submitted_count ?? "未知"} / ${meta.total_problems}`]);
+    extra += detailDisclosure("教师评语", meta.grade_comment ? `<div class="detail-long-text">${esc(meta.grade_comment)}</div>` : "");
+    if (Array.isArray(meta.problems) && meta.problems.length) {
+      const rows = meta.problems.map((problem) => `<tr><td>${esc(problem.title || "题目")}</td><td>${esc(({submitted:"已提交",unsubmitted:"未提交",unknown:"未知"})[problem.submission_status] || "未知")}</td><td>${esc(problem.earned_score ?? "—")}</td><td>${esc(problem.max_score ?? "—")}</td></tr>`).join("");
+      extra += detailDisclosure(`题目明细（${meta.problems.length}）`, `<div class="detail-table-scroll"><table><thead><tr><th>题目</th><th>状态</th><th>得分</th><th>满分</th></tr></thead><tbody>${rows}</tbody></table></div>`);
+    }
+  }
+  if (event.kind === "course") {
+    const courseFields = [["课程代码",meta.courseCode],["课程序号",meta.courseSerialNo],["教学周",meta.week_number],["开始节次",meta.beginSection],["结束节次",meta.endSection],["学期",meta.term_code],["签到检查",detailDate(event.attendance?.checked_at)]];
+    const body = detailFields(courseFields);
+    extra += detailDisclosure("课程信息", body ? `<dl>${body}</dl>` : "");
+  }
+  const description = typeof meta.description === "string" ? meta.description : null;
+  extra += detailDisclosure(event.source === "judge" ? "作业页面内容" : event.kind === "assignment" ? "作业正文" : "详细说明", description ? `<div class="detail-long-text">${esc(description)}</div>` : "");
+  return `<dl>${detailFields(fields)}</dl>${extra}`;
+}
+
 function openCalendarDetail(id) {
-  const event = visibleCalendarEvents().find((item) => String(item.id) === id);
+  const event = state.data.events.find((item) => String(item.id) === String(id));
   if (!event) return;
   $("#calendar-detail-title").textContent = event.title;
-  const date = weekPinnedDate(event) || eventDate(event);
-  const fields = [["来源", sourceLabel(event.source)], ["日期", date ? fmtDate(date, {year:"numeric",month:"long",day:"numeric",weekday:"long"}) : "时间未知"], [event.kind === "assignment" ? "截止" : "时间", eventTimeRange(event)], ["状态", statusLabel(event)], ["教师", eventTeacher(event)], ["教室", event.location]].filter(([,value]) => value);
-  $("#calendar-detail-body").innerHTML = fields.map(([label,value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("");
+  $("#calendar-detail-body").innerHTML = renderEventDetail(event);
   $("#calendar-detail-dialog").showModal();
 }
 
 function renderMonth() {
   const first = new Date(state.cursor.getFullYear(), state.cursor.getMonth(), 1); const start = startOfWeek(first);
-  const cells = Array.from({ length: 42 }, (_, i) => { const d = addDays(start, i); const outside = d.getMonth() !== first.getMonth(); return `<div class="month-day ${outside ? "outside" : ""}"><b>${d.getDate()}</b>${eventsForDay(d).slice(0, 4).map((e) => `<span class="month-event">${fmtTime(anchor(e))} ${esc(e.title)} · ${esc(statusLabel(e))}</span>`).join("")}</div>`; }).join("");
+  const cells = Array.from({ length: 42 }, (_, i) => { const d = addDays(start, i); const outside = d.getMonth() !== first.getMonth(); return `<div class="month-day ${outside ? "outside" : ""}"><b>${d.getDate()}</b>${eventsForDay(d).slice(0, 4).map((e) => `<button type="button" class="month-event" data-calendar-event="${e.id}" title="${esc(e.title)}">${fmtTime(anchor(e))} ${esc(e.title)} · ${esc(statusLabel(e))}</button>`).join("")}</div>`; }).join("");
   return `<div class="month-grid">${cells}</div>`;
 }
 
 function renderAgenda() {
   const groups = new Map();
   visibleCalendarEvents().forEach((event) => { const d = eventDate(event); if (!d) return; const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; if (!groups.has(key)) groups.set(key, { date: d, events: [] }); groups.get(key).events.push(event); });
-  return groups.size ? [...groups.values()].sort((a,b) => a.date-b.date).map((group) => `<section class="agenda-group"><h3>${fmtDate(group.date, { year: "numeric", month: "long", day: "numeric", weekday: "long" })}</h3>${group.events.map((event) => `<div class="agenda-row"><b>${eventTimeRange(event)}</b><strong>${esc(event.title)} ${statusBadge(event)}</strong><span>${esc(eventTeacher(event) || "—")}</span><span>${esc(event.location || "—")}</span></div>`).join("")}</section>`).join("") : empty("日历还是空的", "连接学校账号后，课程与考试会出现在这里");
+  return groups.size ? [...groups.values()].sort((a,b) => a.date-b.date).map((group) => `<section class="agenda-group"><h3>${fmtDate(group.date, { year: "numeric", month: "long", day: "numeric", weekday: "long" })}</h3>${group.events.map(renderAgendaRow).join("")}</section>`).join("") : empty("日历还是空的", "连接学校账号后，课程与考试会出现在这里");
+}
+
+function renderAgendaRow(event) {
+  return `<div class="agenda-row"><b>${eventTimeRange(event)}</b><div><button type="button" class="event-detail-link" data-calendar-event="${event.id}">${esc(event.title)}</button> ${statusBadge(event)}</div><span>${esc(eventTeacher(event) || "—")}</span><span>${esc(event.location || "—")}</span></div>`;
 }
 
 function renderDay() {
   const events = eventsForDay(state.cursor);
-  return events.length ? `<section class="agenda-group"><h3>${fmtDate(state.cursor, { year: "numeric", month: "long", day: "numeric", weekday: "long" })}</h3>${events.map((event) => `<div class="agenda-row"><b>${eventTimeRange(event)}</b><strong>${esc(event.title)} ${statusBadge(event)}</strong><span>${esc(eventTeacher(event) || "—")}</span><span>${esc(event.location || "—")}</span></div>`).join("")}</section>` : empty("这一天没有日程", "可以新建个人日程");
+  return events.length ? `<section class="agenda-group"><h3>${fmtDate(state.cursor, { year: "numeric", month: "long", day: "numeric", weekday: "long" })}</h3>${events.map(renderAgendaRow).join("")}</section>` : empty("这一天没有日程", "可以新建个人日程");
 }
 
 function renderCalendar() {
@@ -246,7 +286,7 @@ function renderCalendar() {
   $("#week-time-tools").hidden = state.view !== "week";
   if (state.view === "week") { canvas.scrollTop = state.weekScrollTop; canvas.scrollLeft = state.weekScrollLeft; }
   else { canvas.scrollTop = 0; canvas.scrollLeft = 0; }
-  $$("[data-calendar-event]").forEach((button) => button.addEventListener("click", () => openCalendarDetail(button.dataset.calendarEvent)));
+  bindEventDetails("#calendar-canvas");
   $$('[data-view]').forEach((button) => button.classList.toggle("active", button.dataset.view === state.view));
 }
 
@@ -267,8 +307,9 @@ function renderTasks() {
   $$("[data-task-status]").forEach((button) => button.classList.toggle("active", button.dataset.taskStatus === state.taskStatus));
   $("#task-list").innerHTML = tasks.length ? tasks.map((event) => {
     const date = eventDate(event), metadata = event.metadata || {}, submittedAt = dateOf(metadata.submitted_at);
-    return `<div class="list-row task-row"><span class="row-icon"><i class="bi ${kindMeta[event.kind][1]}"></i></span><div><strong>${esc(event.title)}</strong><small>${esc(sourceLabel(event.source))}${metadata.assignment_type ? ` · ${esc(assignmentTypeLabel(metadata.assignment_type))}` : ""}${eventTeacher(event) ? ` · ${esc(eventTeacher(event))}` : ""}</small><small class="task-date">${date ? fmtDate(date, { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "时间未知"}${isExpired(event) ? " · 已过期" : ""}</small>${submittedAt ? `<small>提交于 ${fmtDate(submittedAt, { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</small>` : ""}</div>${statusBadge(event)}<button class="quiet-button ignore-button" type="button" data-ignore-event="${event.id}" data-ignored="${Boolean(event.ignored)}"><i class="bi ${event.ignored ? "bi-arrow-counterclockwise" : "bi-eye-slash"}"></i>${event.ignored ? "取消忽略" : "忽略"}</button></div>`;
+    return `<div class="list-row task-row"><span class="row-icon"><i class="bi ${kindMeta[event.kind][1]}"></i></span><div><button type="button" class="event-detail-link" data-calendar-event="${event.id}">${esc(event.title)}</button><small>${esc(sourceLabel(event.source))}${metadata.assignment_type ? ` · ${esc(assignmentTypeLabel(metadata.assignment_type))}` : ""}${eventTeacher(event) ? ` · ${esc(eventTeacher(event))}` : ""}</small><small class="task-date">${date ? fmtDate(date, { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "时间未知"}${isExpired(event) ? " · 已过期" : ""}</small>${submittedAt ? `<small>提交于 ${fmtDate(submittedAt, { year: "numeric", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}</small>` : ""}</div><div class="task-badges">${statusBadge(event)}</div><button class="quiet-button ignore-button" type="button" data-ignore-event="${event.id}" data-ignored="${Boolean(event.ignored)}"><i class="bi ${event.ignored ? "bi-arrow-counterclockwise" : "bi-eye-slash"}"></i>${event.ignored ? "取消忽略" : "忽略"}</button></div>`;
   }).join("") : empty("没有符合筛选的待办", "可切换状态、学期或过期筛选", "bi-list-check");
+  bindEventDetails("#task-list");
   $$("[data-ignore-event]").forEach((button) => button.addEventListener("click", async () => {
     button.disabled = true;
     try {

@@ -84,6 +84,64 @@ function app() {
   return { context, elements, run: (code) => vm.runInContext(code, context) };
 }
 
+test('shared details preserve zero scores and expose safe collapsed long content', () => {
+  const ui = app();
+  ui.context.event = {id:1,kind:'assignment',source:'spoc',title:'任务',due_at:'2030-09-01T23:59:00',status:'done',metadata:{
+    earned_score:0,max_score:100,graded:true,grade_comment:'<img src=x onerror=bad()>\n评语',
+    description:'长正文'.repeat(12000)+'<script>bad()</script>',submitted_at:'2030-08-31T10:00:00'}};
+  const html = ui.run('renderEventDetail(event)');
+  assert.match(html, /<dt>得分<\/dt><dd>0<\/dd>/);
+  assert.match(html, /<dt>满分<\/dt><dd>100<\/dd>/);
+  assert.match(html, /教师已批阅|2030/);
+  assert.match(html, /<summary>教师评语<\/summary>/);
+  assert.match(html, /<summary>作业正文<\/summary>/);
+  assert.match(html, /&lt;img|&lt;script/);
+  assert.ok(html.includes('长正文'.repeat(12000)));
+  assert.doesNotMatch(html, /<details[^>]*\bopen\b|<img\b|<script\b/);
+});
+
+test('unknown personal grade is not replaced by assignment maximum or legacy score', () => {
+  const ui = app();
+  const html = ui.run('renderEventDetail({kind:"assignment",source:"spoc",status:"pending",metadata:{max_score:100,score:100,grading_known:false}})');
+  assert.doesNotMatch(html, /<dt>得分/);
+  assert.match(html, /<dt>批阅<\/dt><dd>未知/);
+  assert.doesNotMatch(html, /event-disclosure/);
+});
+
+test('JUDGE problem and course sections only show known fields and default closed', () => {
+  const ui = app();
+  let html = ui.run('renderEventDetail({kind:"assignment",source:"judge",metadata:{problems:[{title:"零分题",earned_score:0,max_score:10,submission_status:"submitted"},{title:"未知题"}],description:"整页文字"}})');
+  assert.match(html, /题目明细（2）/);
+  assert.match(html, /<td>已提交<\/td><td>0<\/td><td>10/);
+  assert.match(html, /<td>未知<\/td><td>—<\/td><td>—/);
+  assert.match(html, /作业页面内容/);
+  html = ui.run('renderEventDetail({kind:"course",source:"byxt",location:"教室",attendance:{status:"done",checked_at:"2030-09-01T09:00:00"},metadata:{teacher:"教师",courseCode:"code",beginSection:3,week_number:0}})');
+  assert.match(html, /课程信息|已签到|教室|教师/);
+  assert.match(html, /<dt>教学周<\/dt><dd>0/);
+  assert.doesNotMatch(html, /<dt>结束节次|<details[^>]*\bopen\b/);
+});
+
+test('ignored and completed events still have a read-only details entry', () => {
+  const ui = app();
+  ui.run('state.data.events=[{id:7,kind:"assignment",source:"judge",title:"已忽略条目",ignored:true,status:"done"}]; $("#calendar-detail-dialog").showModal=()=>{}; openCalendarDetail("7");');
+  assert.equal(ui.elements.get('#calendar-detail-title').textContent, '已忽略条目');
+  assert.match(ui.elements.get('#calendar-detail-body').innerHTML, /已忽略/);
+  ui.run('state.taskStatus="ignored";renderTasks();');
+  assert.match(ui.elements.get('#task-list').innerHTML, /data-calendar-event="7"/);
+  assert.match(ui.elements.get('#task-list').innerHTML, /data-ignore-event="7"/);
+});
+
+test('short weekly cards keep title and time before secondary content', () => {
+  const ui = app();
+  ui.run('state.cursor=new Date("2030-09-02T12:00:00");state.data.events=[{id:1,kind:"course",source:"byxt",title:"短课程",starts_at:"2030-09-02T14:50:00",ends_at:"2030-09-02T15:35:00",location:"教室",metadata:{teacher:"教师"}}];');
+  const html = ui.run('renderWeek()');
+  assert.match(html, /calendar-event compact/);
+  assert.match(html, /<strong>短课程<\/strong><span class="calendar-event-time">14:50–15:35/);
+  const css = fs.readFileSync(path.join(__dirname,'../web/styles.css'),'utf8');
+  assert.match(css, /\.calendar-event > \* \{ flex-shrink: 0/);
+  assert.match(css, /\.calendar-event.compact \.calendar-event-meta[^}]+display: none/);
+});
+
 test('task filters hide expired items, show year and submitted labels', () => {
   const ui = app();
   ui.run(`state.data.events = [

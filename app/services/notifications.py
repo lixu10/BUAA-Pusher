@@ -4,6 +4,7 @@ import asyncio
 import json
 import smtplib
 import ssl
+import time
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from typing import Any
@@ -115,17 +116,73 @@ class NotificationSender:
 
 
 class TriggerDispatcher:
-    def __init__(self, db: Database, sender: NotificationSender, enforce_feature_scope: bool = False, attendance_checker=None):
+    def __init__(self, db: Database, sender: NotificationSender, enforce_feature_scope: bool = False, attendance_checker=None, source_refresher=None):
         self.db, self.sender = db, sender
         self.enforce_feature_scope = enforce_feature_scope
         self.attendance_checker = attendance_checker
+        self.source_refresher = source_refresher
+        self.active_groups: set[tuple[int, str]] = set()
+        self.refresh_slots = asyncio.Semaphore(4)
 
     async def dispatch_due(self) -> int:
-        processed = 0
-        for trigger in self.db.due_triggers():
+        groups = {}
+        # Active source groups are already being processed by an earlier tick.
+        # Look beyond them so they cannot hide another user's due reminders.
+        for trigger in self.db.due_triggers(limit=500):
             context = self.db.trigger_context(trigger["id"])
             if not context or context.get("status") != "queued":
                 continue
+            key = (trigger["user_id"], "signin" if context["definition"].get("profile") == "signin" else context["source"])
+            if key not in self.active_groups:
+                groups.setdefault(key, []).append(trigger)
+                if sum(map(len, groups.values())) >= 50:
+                    break
+        self.active_groups.update(groups)
+        async def dispatch_group(key, triggers):
+            try:
+                return await self._dispatch_batch(triggers)
+            finally:
+                self.active_groups.discard(key)
+        results = await asyncio.gather(*(dispatch_group(key, triggers) for key, triggers in groups.items()), return_exceptions=True)
+        return sum(result for result in results if isinstance(result, int))
+
+    async def _dispatch_batch(self, triggers) -> int:
+        processed = 0
+        refreshed = None
+        refreshed_at = 0
+        for trigger in triggers:
+            context = self.db.trigger_context(trigger["id"])
+            if not context or context.get("status") != "queued":
+                continue
+            signin = context["definition"].get("profile") == "signin"
+            # Quiet-hour deferrals require no network work until their actual
+            # delivery time. Checkpoint attendance already has its own reader.
+            if self.source_refresher and not signin and context["rule_enabled"] and not context.get("ignored") and (
+                not self.enforce_feature_scope or (rule_available(context["definition"])
+                    and (self.db.get_source(trigger["user_id"], context["source"]) or {}).get("enabled", True))
+            ) and self._quiet_decision(trigger["user_id"], context["definition"].get("quiet_hours_policy", "delay")) is None:
+                if refreshed is None or (refreshed[0] and time.monotonic() - refreshed_at > 30):
+                    try:
+                        async with self.refresh_slots:
+                            refreshed = await self.source_refresher(trigger["user_id"], context["source"])
+                    except Exception:
+                        refreshed = (False, "通知前同步失败")
+                    refreshed_at = time.monotonic()
+                # Sync replans/removes scheduled triggers and may change rules,
+                # dates, completion, ignore state or source availability.
+                context = self.db.trigger_context(trigger["id"])
+                if not context or context.get("status") != "queued" or RuleEngine.parse_time(context["run_at"]) > datetime.now(UTC):
+                    continue
+                trigger = context
+                if not refreshed[0]:
+                    self._defer_refresh(trigger, refreshed[1])
+                    processed += 1
+                    continue
+                self.db.reset_trigger_refresh_attempts(trigger["id"])
+                if context.get("change") and not self._change_still_current(context):
+                    self.db.finish_trigger(trigger["id"], "cancelled", "变化已被更新或撤销")
+                    processed += 1
+                    continue
             event = {
                 "title": context["title"], "kind": context["kind"], "source": context["source"],
                 "starts_at": context["starts_at"], "ends_at": context["ends_at"],
@@ -161,17 +218,6 @@ class TriggerDispatcher:
                 self.db.finish_trigger(trigger["id"], "skipped", "触发条件不成立")
                 processed += 1
                 continue
-            if signin:
-                end = RuleEngine.parse_time(event.get("ends_at"))
-                if not end or datetime.now(UTC) > end + timedelta(seconds=30) or not self.attendance_checker:
-                    self.db.finish_trigger(trigger["id"], "skipped", "签到检查已过期或不可用")
-                    processed += 1
-                    continue
-                result, detail = await self.attendance_checker(trigger["user_id"], context, event, definition)
-                if result != "missing":
-                    self.db.finish_trigger(trigger["id"], "cancelled" if result == "done" else "failed" if result == "error" else "skipped", detail)
-                    processed += 1
-                    continue
             quiet = self._quiet_decision(trigger["user_id"], definition.get("quiet_hours_policy", "delay"))
             # Deadline alerts must never arrive at/after the deadline, including
             # delayed quiet-hours messages and retry attempts.
@@ -187,13 +233,29 @@ class TriggerDispatcher:
                 processed += 1
                 continue
             if isinstance(quiet, datetime):
-                if signin and quiet.astimezone(UTC) > end:
+                end = RuleEngine.parse_time(event.get("ends_at"))
+                if signin and (not end or quiet.astimezone(UTC) > end):
                     self.db.finish_trigger(trigger["id"], "skipped", "课程结束前无可发送时机")
                     processed += 1
                     continue
                 self.db.reschedule_trigger(trigger["id"], quiet.astimezone(UTC).isoformat(), "延后至安静时段结束")
                 processed += 1
                 continue
+            if signin:
+                end = RuleEngine.parse_time(event.get("ends_at"))
+                if not end or datetime.now(UTC) > end + timedelta(seconds=30) or not self.attendance_checker:
+                    self.db.finish_trigger(trigger["id"], "skipped", "签到检查已过期或不可用")
+                    processed += 1
+                    continue
+                result, detail = await self.attendance_checker(trigger["user_id"], context, event, definition)
+                if result != "missing":
+                    self.db.finish_trigger(trigger["id"], "cancelled" if result == "done" else "failed" if result == "error" else "skipped", detail)
+                    processed += 1
+                    continue
+                if datetime.now(UTC) > end + timedelta(seconds=30):
+                    self.db.finish_trigger(trigger["id"], "skipped", "查询完成时课程检查已过期")
+                    processed += 1
+                    continue
             try:
                 action = definition["actions"][trigger["action_index"]]
                 body = self._message_body(context, event)
@@ -216,6 +278,36 @@ class TriggerDispatcher:
                     self.db.finish_trigger(trigger["id"], "failed", f"重试已用尽：{str(exc)}")
             processed += 1
         return processed
+
+    def _defer_refresh(self, trigger, detail):
+        attempts = int(trigger.get("refresh_attempts") or 0)
+        if attempts >= 3:
+            self.db.finish_trigger(trigger["id"], "failed", f"通知前同步重试已用尽：{detail}")
+            return
+        delay = (1, 5, 15)[attempts]
+        retry_at = datetime.now(UTC) + timedelta(minutes=delay)
+        # A retry never sends a deadline reminder at or beyond the deadline.
+        deadline = RuleEngine.parse_time(trigger.get("due_at"))
+        if not trigger.get("change") and trigger.get("kind") == "assignment" and deadline and retry_at >= deadline:
+            self.db.finish_trigger(trigger["id"], "skipped", "通知前同步未成功，截止前已无重试时机")
+            return
+        self.db.reschedule_trigger(trigger["id"], retry_at.isoformat(),
+            f"通知前同步未成功，{delay} 分钟后重试：{detail}", increment_refresh_attempts=True)
+
+    @staticmethod
+    def _change_still_current(context):
+        change, current = context["change"], context.get("current_event")
+        if change["type"] == "course-change":
+            after = change.get("after")
+            return current is None if after is None else bool(current and course_fields(current) == course_fields(after))
+        if current is None:
+            return False
+        if change["type"] == "assignment-grade":
+            after = (change.get("after") or {}).get("metadata") or {}
+            latest = current.get("metadata") or {}
+            return latest.get("graded") and latest.get("grading_known") and all(
+                latest.get(key) == after.get(key) for key in ("earned_score", "grade_comment", "graded_at"))
+        return True
 
     @staticmethod
     def _message_body(context: dict[str, Any], event: dict[str, Any]) -> str:

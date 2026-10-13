@@ -50,6 +50,7 @@ def merge_calendar(events, enabled=True):
 def plan_checks(db, user_id, rule, courses, now):
     excluded = {re.sub(r"\s+", "", name) for name in rule.get("profile_settings", {}).get("excluded_courses", [])}
     plans = []
+    queued_keys = db.queued_trigger_keys(user_id, rule["id"])
     for course in courses:
         if course.get("source") != "byxt" or course.get("kind") != "course" or course.get("ignored") or course_name(course) in excluded:
             continue
@@ -63,14 +64,17 @@ def plan_checks(db, user_id, rule, courses, now):
         for point in rule["profile_settings"]["check_times"]:
             anchor = start if point["anchor"] == "starts_at" else end
             at = anchor + timedelta(minutes=point["offset_minutes"])
-            if start - timedelta(minutes=10) <= at <= end and at >= now - timedelta(seconds=30):
+            if start - timedelta(minutes=10) <= at <= end and end >= now:
                 points.add(at)
         for at in sorted(points):
             check_key = hashlib.sha256(f"{user_id}:{rule['id']}:{slot(course)}:{at.isoformat()}".encode()).hexdigest()
             for index, _ in enumerate(rule["actions"]):
+                dedupe_key = f"attendance:{check_key}:{index}"
+                if at < now - timedelta(seconds=30) and dedupe_key not in queued_keys:
+                    continue
                 plans.append({"event_id": course["id"], "action_index": index, "occurrence": 1,
                     "run_at": at.isoformat(), "check_key": check_key,
-                    "dedupe_key": f"attendance:{check_key}:{index}"})
+                    "dedupe_key": dedupe_key})
     return db.replace_triggers_for_rule(user_id, rule["id"], plans)
 
 
@@ -128,7 +132,10 @@ class AttendanceService:
                 self.db.cancel_course_checks(user_id, context["rule_id"], course["id"])
                 return "done", "已签到，后续检查取消"
             previous = self.db.attendance_check_result(user_id, key)
-            if previous:
+            # A missing result is reusable only for this delivery time. A retry
+            # or quiet-hour delay has a later run_at and must query again.
+            observed = parsed(previous["created_at"]) if previous else None
+            if observed and observed >= parsed(context["run_at"]) and datetime.now(UTC) - observed <= timedelta(seconds=30):
                 return previous["result"], previous["detail"]
             now, start, end = datetime.now(UTC), parsed(course["starts_at"]), parsed(course["ends_at"])
             if not start or not end or not start - timedelta(minutes=10) <= now <= end + timedelta(seconds=30):
@@ -140,14 +147,16 @@ class AttendanceService:
                 day = start.astimezone(CHINA).date()
                 mode = (self.db.get_source(user_id, "iclass") or {}).get("network_mode", "direct")
                 query_key = (user_id, day.isoformat(), mode, context["run_at"])
-                if query_key not in self.day_reads:
+                cached_read = self.day_reads.get(query_key)
+                if not cached_read or datetime.now(UTC) - cached_read["at"] > timedelta(seconds=30):
                     if len(self.day_reads) >= 64:
                         self.day_reads.pop(next(iter(self.day_reads)))
                     try:
-                        self.day_reads[query_key] = await self.query_day(user_id, day)
+                        records = await self.query_day(user_id, day)
                     except Exception:
-                        self.day_reads[query_key] = None
-                records = self.day_reads[query_key]
+                        records = None
+                    self.day_reads[query_key] = {"at": datetime.now(UTC), "records": records}
+                records = self.day_reads[query_key]["records"]
                 if records is None:
                     raise RuntimeError("签到查询失败")
                 matches = [r for r in records if slot(r) == slot(course)]

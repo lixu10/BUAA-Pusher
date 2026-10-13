@@ -275,6 +275,10 @@ class Database:
                 self._connection.execute(
                     "ALTER TABLE scheduled_triggers ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"
                 )
+            for table in ("scheduled_triggers", "change_triggers"):
+                columns = {row["name"] for row in self._connection.execute(f"PRAGMA table_info({table})")}
+                if "refresh_attempts" not in columns:
+                    self._connection.execute(f"ALTER TABLE {table} ADD COLUMN refresh_attempts INTEGER NOT NULL DEFAULT 0")
             preference_columns = {row["name"] for row in self._connection.execute("PRAGMA table_info(user_preferences)")}
             for name, definition in [("academic_filter_enabled", "INTEGER NOT NULL DEFAULT 1"),
                                      ("academic_start_date", "TEXT"), ("academic_end_date", "TEXT"),
@@ -848,12 +852,18 @@ class Database:
                 inserted += cursor.rowcount
         return inserted
 
+    def queued_trigger_keys(self, user_id: int, rule_id: int) -> set[str]:
+        return {row["dedupe_key"] for row in self._rows(
+            "SELECT dedupe_key FROM scheduled_triggers WHERE user_id=? AND rule_id=? AND status='queued'",
+            (user_id, rule_id))}
+
     def attendance_check_result(self, user_id: int, check_key: str) -> dict | None:
-        return self._one("SELECT result,detail FROM attendance_check_results WHERE user_id=? AND check_key=?", (user_id, check_key))
+        return self._one("SELECT result,detail,created_at FROM attendance_check_results WHERE user_id=? AND check_key=?", (user_id, check_key))
 
     def record_attendance_check(self, user_id: int, check_key: str, result: str, detail: str = "") -> None:
         with self._lock, self._connection:
-            self._connection.execute("INSERT OR IGNORE INTO attendance_check_results VALUES(?,?,?,?,?)",
+            self._connection.execute("INSERT INTO attendance_check_results VALUES(?,?,?,?,?) "
+                "ON CONFLICT(user_id,check_key) DO UPDATE SET result=excluded.result,detail=excluded.detail,created_at=excluded.created_at",
                 (user_id, check_key, result, detail[:160], now_iso()))
 
     def cancel_course_checks(self, user_id: int, rule_id: int, event_id: int) -> None:
@@ -870,7 +880,7 @@ class Database:
         )
         changed = self._rows(
             "SELECT -t.id AS id,t.user_id,t.rule_id,t.change_id,t.action_index,t.occurrence,t.run_at,t.status,t.detail,"
-            "t.attempts,r.name AS rule_name,json_extract(c.payload,'$.event.title') AS event_title "
+            "t.attempts,t.refresh_attempts,r.name AS rule_name,json_extract(c.payload,'$.event.title') AS event_title "
             "FROM change_triggers t JOIN automation_rules r ON r.id=t.rule_id JOIN sync_changes c ON c.id=t.change_id "
             "WHERE t.user_id=? ORDER BY t.run_at LIMIT ?", (user_id, limit))
         return sorted(rows + changed, key=lambda row: row["run_at"])[:limit]
@@ -899,11 +909,12 @@ class Database:
             payload = json.loads(row.pop("payload"))
             event = payload["event"]
             current = self.event_by_key(row["user_id"], row["source"], row["external_id"])
-            row.update({key: event.get(key) for key in ("title", "kind", "starts_at", "ends_at", "due_at", "location")})
+            display_event = current or event
+            row.update({key: display_event.get(key) for key in ("title", "kind", "starts_at", "ends_at", "due_at", "location")})
             row.update(id=trigger_id, event_status=(current or event).get("status", "unknown"),
                        ignored=(current or event).get("ignored", False),
                        metadata=(current or event).get("metadata", {}), change=payload,
-                       definition=json.loads(row["definition"]))
+                       definition=json.loads(row["definition"]), current_event=current)
             return row
         row = self._one(
             """SELECT t.*,r.name AS rule_name,r.definition,r.enabled AS rule_enabled,
@@ -926,15 +937,21 @@ class Database:
             )
 
     def reschedule_trigger(
-        self, trigger_id: int, run_at: str, detail: str = "", increment_attempts: bool = False
+        self, trigger_id: int, run_at: str, detail: str = "", increment_attempts: bool = False,
+        increment_refresh_attempts: bool = False
     ) -> None:
         table = "change_triggers" if trigger_id < 0 else "scheduled_triggers"
         with self._lock, self._connection:
             self._connection.execute(
-                f"""UPDATE {table} SET run_at=?,detail=?,attempts=attempts+?
+                f"""UPDATE {table} SET run_at=?,detail=?,attempts=attempts+?,refresh_attempts=refresh_attempts+?
                    WHERE id=? AND status='queued'""",
-                (run_at, detail[:300], int(increment_attempts), abs(trigger_id)),
+                (run_at, detail[:300], int(increment_attempts), int(increment_refresh_attempts), abs(trigger_id)),
             )
+
+    def reset_trigger_refresh_attempts(self, trigger_id: int) -> None:
+        table = "change_triggers" if trigger_id < 0 else "scheduled_triggers"
+        with self._lock, self._connection:
+            self._connection.execute(f"UPDATE {table} SET refresh_attempts=0 WHERE id=?", (abs(trigger_id),))
 
     def create_delivery(self, values: dict[str, Any]) -> int:
         trigger_id = values.get("trigger_id")
