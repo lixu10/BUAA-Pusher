@@ -129,4 +129,4 @@ def catalog_options(events):
         campuses.update(zip(meta.get("campus_ids") or [], meta.get("campus_names") or []))
     return {"categories": [{"value": key, "label": value} for key, value in sorted(categories.items(), key=lambda item: item[1])],
             "campuses": [{"value": key, "label": value} for key, value in sorted(campuses.items(), key=lambda item: item[1])],
-            "sign_types": [{"value": "1", "label": "仅签到"}, {"value": "2", "label": "签到＋签退"}]}
+            "sign_types": [{"value": "1", "label": "常规签到"}, {"value": "2", "label": "自主签到"}]}

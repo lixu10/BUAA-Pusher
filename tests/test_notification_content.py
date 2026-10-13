@@ -24,7 +24,7 @@ class DetailedContentTest(unittest.TestCase):
             "teacher":"教师", "category_names":["博雅","美育"], "campus_names":["学院路"], "sign_type":"2", "remaining":3,
             "current_count":7,"max_count":10,"selected":False,"enrollment_starts_at":"2030-08-31T12:00:00+08:00","enrollment_ends_at":"2030-09-01T12:00:00+08:00"}}
         body=message_body({"definition":{"profile":"boya-seats"},"network_mode":"webvpn"},event)
-        for part in ["名额回流","分类：博雅 / 美育","适用校区：学院路","签到＋签退","余量：3","7 / 10","未报名","https://d.buaa.edu.cn/https/"]: self.assertIn(part,body)
+        for part in ["名额回流","分类：博雅 / 美育","适用校区：学院路","自主签到","余量：3","7 / 10","未报名","https://d.buaa.edu.cn/https/"]: self.assertIn(part,body)
         event["kind"]="boya";event["metadata"]["sign_windows"]={"signStartDate":"2030-09-01T14:50:00+08:00"}
         self.assertIn("签到开始：2030-09-01 14:50:00",message_body({"definition":{"profile":"boya-course"}},event))
 

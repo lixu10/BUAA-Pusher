@@ -7,6 +7,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response, Query
@@ -587,10 +588,15 @@ def dashboard(user: dict[str, Any] = Depends(current_user)):
 
 
 @app.get("/api/boya/courses")
-def boya_courses(page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100), search: str = Query("", max_length=120), category: str = "", campus: str = "", sign_type: str = "", status: str = "", user: dict = Depends(current_user)):
+def boya_courses(page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100), search: str = Query("", max_length=120), category: str = "", campus: str = "", sign_type: str = "", status: str = "", include_expired: bool = False, user: dict = Depends(current_user)):
     rows = db.list_boya_courses(user["id"])
     settings = {"keywords": [search] if search.strip() else [], "categories": [category] if category else [], "campuses": [campus] if campus else [], "sign_types": [sign_type] if sign_type else []}
     rows = [{**event, "enrollment_state": enrollment_state(event)} for event in rows if filter_matches(settings, event)]
+    if not include_expired:
+        now = datetime.now(UTC)
+        rows = [event for event in rows if not any(at and at <= now for at in (
+            RuleEngine.parse_time(event.get("starts_at")), RuleEngine.parse_time(event.get("ends_at")),
+            RuleEngine.parse_time(event["metadata"].get("enrollment_ends_at"))))]
     if status:
         rows = [event for event in rows if event["enrollment_state"] == status]
     rows.sort(key=lambda event: (event["metadata"].get("enrollment_starts_at") or "9999", event["title"]))

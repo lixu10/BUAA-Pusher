@@ -5,16 +5,18 @@ const boyaProfileNames = {
 };
 const boyaCatalogProfiles = new Set(['boya-new-course','boya-enrollment-soon','boya-enrollment-open','boya-seats','boya-enrollment-closing']);
 const boyaStateLabels = {preview:'未开放',available:'可报名',full:'已满',closed:'报名结束',started:'已开课',ended:'已结束',selected:'已报名',unknown:'状态未知'};
-let boyaView = {tab:'chosen',page:1,data:null,loading:false,version:0};
+let boyaView = {tab:'chosen',page:1,data:null,loading:false,version:0,chosenHistory:false,catalogHistory:false};
 function boyaEnabled() { return Boolean(state.data.sources.find(source=>source.id==='bykc')?.enabled); }
-function boyaSignType(meta) { return ({'1':'仅签到','2':'签到＋签退'})[meta.sign_type] || '签到方式未知'; }
+function boyaSignType(meta) { return ({'1':'常规签到','2':'自主签到'})[meta.sign_type] || '签到方式未知'; }
 function boyaCampus(meta) { return meta.all_campuses ? '全部校区' : (meta.campus_names || []).join('、') || '校区未知'; }
-function boyaOptions() { return state.data.boya_options || {categories:[],campuses:[],sign_types:[{value:'1',label:'仅签到'},{value:'2',label:'签到＋签退'}]}; }
+function boyaOptions() { return state.data.boya_options || {categories:[],campuses:[],sign_types:[{value:'1',label:'常规签到'},{value:'2',label:'自主签到'}]}; }
 function renderBoya() {
   const source = state.data.sources.find(source=>source.id==='bykc'), catalog = state.data.boya_catalog_state || {};
   $$('[data-boya-tab]').forEach(button=>button.classList.toggle('active',button.dataset.boyaTab===boyaView.tab));
   $('#boya-filters').hidden = boyaView.tab !== 'catalog';
   $('#boya-pager').hidden = boyaView.tab !== 'catalog';
+  $('#boya-only-self-row').hidden=boyaView.tab!=='catalog';
+  $('#boya-only-self').checked=$('#boya-sign-type').value==='2';
   const key = boyaView.tab === 'catalog' ? catalog : source || {};
   $('#boya-sync').disabled = !boyaEnabled() || Boolean(key.syncing);
   $('#boya-sync').innerHTML = `<i class="bi bi-arrow-repeat"></i>${key.syncing ? '同步中' : boyaView.tab==='catalog' ? '同步课程列表' : '同步已报名'}`;
@@ -32,7 +34,7 @@ function renderBoya() {
   }
   let courses;
   if (boyaView.tab==='chosen') {
-    courses = state.data.events.filter(event=>event.source==='bykc' && event.kind==='boya' && !event.ignored && ($('#boya-history').checked || !isExpired(event))).sort((a,b)=>(eventDate(a)?.getTime()??Infinity)-(eventDate(b)?.getTime()??Infinity));
+    courses = state.data.events.filter(event=>event.source==='bykc' && event.kind==='boya' && !event.ignored && (boyaView.chosenHistory || !isExpired(event))).sort((a,b)=>(eventDate(a)?.getTime()??Infinity)-(eventDate(b)?.getTime()??Infinity));
     $('#boya-count').textContent = `${courses.length} 门`;
   } else {
     courses = boyaView.data?.courses || [];
@@ -42,7 +44,9 @@ function renderBoya() {
     $('#boya-page-prev').disabled = boyaView.page<=1;
     $('#boya-page-next').disabled = boyaView.page>=pages;
   }
-  $('#boya-history-row').hidden = boyaView.tab!=='chosen';
+  $('#boya-history-row').hidden = false;
+  $('#boya-history-label').textContent = boyaView.tab==='chosen'?'显示已结束':'显示已过期';
+  $('#boya-history').checked = boyaView.tab==='chosen'?boyaView.chosenHistory:boyaView.catalogHistory;
   $('#boya-list').innerHTML = courses.length ? courses.map(event=>{
     const meta=event.metadata || {}, selected=boyaView.tab==='chosen'||meta.selected===true;
     const status=selected?statusLabel(event):boyaStateLabels[event.enrollment_state] || '状态未知';
@@ -54,7 +58,7 @@ function renderBoya() {
 }
 async function loadBoyaCatalog() {
   const version=++boyaView.version; boyaView.loading=true;
-  const query=new URLSearchParams({page:String(boyaView.page),size:'20',search:$('#boya-search').value,category:$('#boya-category').value,campus:$('#boya-campus').value,sign_type:$('#boya-sign-type').value,status:$('#boya-filter-state').value});
+  const query=new URLSearchParams({page:String(boyaView.page),size:'20',search:$('#boya-search').value,category:$('#boya-category').value,campus:$('#boya-campus').value,sign_type:$('#boya-sign-type').value,status:$('#boya-filter-state').value,include_expired:String(boyaView.catalogHistory)});
   try { const data=await api(`/api/boya/courses?${query}`); if(version!==boyaView.version)return; boyaView.data=data; }
   catch(error) { toast(error.message); }
   finally { if(version===boyaView.version){boyaView.loading=false;renderBoya();} }
@@ -109,8 +113,12 @@ function collectBoyaSettings(settings) {
 function bindBoyaEvents() {
   $$('[data-boya-tab]').forEach(button=>button.addEventListener('click',()=>{boyaView.tab=button.dataset.boyaTab;renderBoya();if(boyaView.tab==='catalog')loadBoyaCatalog();}));
   $('#boya-sync').addEventListener('click',syncBoyaComponent);
-  $('#boya-history').addEventListener('change',renderBoya);
-  for(const selector of ['#boya-category','#boya-campus','#boya-sign-type','#boya-filter-state']) $(selector).addEventListener('change',()=>{boyaView.page=1;loadBoyaCatalog();});
+  $('#boya-only-self').addEventListener('change',event=>{$('#boya-sign-type').value=event.target.checked?'2':'';boyaView.page=1;loadBoyaCatalog();});
+  $('#boya-history').addEventListener('change',event=>{
+    if(boyaView.tab==='chosen'){boyaView.chosenHistory=event.target.checked;renderBoya();}
+    else {boyaView.catalogHistory=event.target.checked;boyaView.page=1;if(!event.target.checked&&['closed','started','ended'].includes($('#boya-filter-state').value))$('#boya-filter-state').value='';loadBoyaCatalog();}
+  });
+  for(const selector of ['#boya-category','#boya-campus','#boya-sign-type','#boya-filter-state']) $(selector).addEventListener('change',()=>{if(['closed','started','ended'].includes($('#boya-filter-state').value))boyaView.catalogHistory=true;boyaView.page=1;loadBoyaCatalog();});
   let searchTimer;
   $('#boya-search').addEventListener('input',()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{boyaView.page=1;loadBoyaCatalog();},250);});
   $('#boya-page-prev').addEventListener('click',()=>{boyaView.page--;loadBoyaCatalog();});

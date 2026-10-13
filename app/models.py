@@ -129,7 +129,7 @@ class AutomationRuleCreate(BaseModel):
                     raise ValueError("博雅筛选项应为最多100个短文本")
                 self.profile_settings[field] = list(dict.fromkeys(value.strip() for value in values if value.strip()))
             if any(value not in {"1", "2"} for value in self.profile_settings["sign_types"]):
-                raise ValueError("签到类型仅支持仅签到、签到＋签退")
+                raise ValueError("签到类型仅支持常规签到、自主签到")
             for key, default, minimum, maximum in [("min_remaining", 1, 1, 10000), ("cooldown_minutes", 15, 0, 1440)]:
                 value = self.profile_settings.get(key, default)
                 if type(value) is not int or not minimum <= value <= maximum:

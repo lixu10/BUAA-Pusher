@@ -2,13 +2,13 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#101c30">
   <title>PUAA</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://cdn.jsdelivr.net">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-  <link rel="stylesheet" href="/styles.css?v=20261013-2">
+  <link rel="stylesheet" href="/styles.css?v=20261013-mobile-2">
 </head>
 <body>
   <section class="auth-screen" id="auth-screen">
@@ -33,7 +33,7 @@
     </div>
   </section>
 
-  <section class="app-shell" id="app-shell" hidden>
+  <section class="app-shell" id="app-shell" data-page="today" hidden>
     <aside class="sidebar">
       <a class="brand" href="#today"><span class="brand-mark">P</span><span>PUAA</span></a>
       <nav class="nav" aria-label="产品导航">
@@ -41,9 +41,10 @@
         <a class="nav-item" href="#calendar" data-page="calendar"><i class="bi bi-calendar3"></i><span>日历</span></a>
         <a class="nav-item" href="#tasks" data-page="tasks"><i class="bi bi-list-check"></i><span>待办</span></a>
         <a class="nav-item" href="#boya" data-page="boya"><i class="bi bi-compass"></i><span>博雅</span></a>
-        <a class="nav-item" href="#alerts" data-page="alerts"><i class="bi bi-bell"></i><span>提醒</span></a>
-        <a class="nav-item" href="#connections" data-page="connections"><i class="bi bi-plug"></i><span>连接</span></a>
-        <a class="nav-item" href="#channels" data-page="channels"><i class="bi bi-send"></i><span>通知渠道</span></a>
+        <a class="nav-item nav-secondary" href="#alerts" data-page="alerts"><i class="bi bi-bell"></i><span>提醒</span></a>
+        <a class="nav-item nav-secondary" href="#connections" data-page="connections"><i class="bi bi-plug"></i><span>连接</span></a>
+        <a class="nav-item nav-secondary" href="#channels" data-page="channels"><i class="bi bi-send"></i><span>通知渠道</span></a>
+        <button class="nav-more" id="mobile-more-button" type="button" aria-haspopup="dialog"><i class="bi bi-grid"></i><span>更多</span></button>
       </nav>
       <button class="user-button" id="user-button" type="button"><span class="user-avatar" id="user-avatar"></span><span><strong id="user-name"></strong><small id="school-state">未连接北航</small></span></button>
     </aside>
@@ -57,14 +58,13 @@
           <button class="quiet-button" id="today-button" type="button">今天</button>
         </div>
         <div class="top-actions">
-          <label class="check-row visibility-control"><input type="checkbox" id="show-completed"><span>显示已完成</span></label>
           <button class="icon-button" id="sync-button" aria-label="同步"><i class="bi bi-arrow-repeat"></i></button>
           <button class="quiet-button" id="add-button" type="button" disabled><span>自定义日程 · Coming Soon</span></button>
         </div>
       </header>
 
       <section class="page active" id="page-today">
-        <div class="context-line"><strong id="today-label"></strong><span id="source-summary">尚未同步</span></div>
+        <div class="context-line today-context"><div><strong id="today-label"></strong><span id="source-summary">尚未同步</span></div><button type="button" class="icon-button mobile-page-sync" id="today-sync" aria-label="同步全部"><i class="bi bi-arrow-repeat"></i></button></div>
         <div class="today-summary" id="today-summary"></div>
         <div class="today-layout">
           <section class="day-sheet" aria-label="今日时间线"><div id="today-timeline"></div></section>
@@ -77,8 +77,9 @@
           <div class="view-tabs" role="tablist" aria-label="日历视图">
             <button data-view="day">日</button><button data-view="week" class="active">周</button><button data-view="month">月</button>
           </div>
-          <div id="week-time-tools" class="week-time-tools" role="group" aria-label="定位时间"><span>0–24 点</span><button type="button" class="quiet-button" data-week-hour="0">0 点</button><button type="button" class="quiet-button" data-week-hour="8">8 点</button><button type="button" class="quiet-button" data-week-hour="18">18 点</button></div>
+          <div id="week-time-tools" class="week-time-tools" role="group" aria-label="时刻表显示"><span id="week-hours-label">08:00–22:00</span><button type="button" class="quiet-button" id="week-density">舒适</button><button type="button" class="quiet-button" id="week-reset-hours">自动时段</button><button type="button" class="quiet-button" data-week-hour="0">0 点</button><button type="button" class="quiet-button" data-week-hour="8">8 点</button><button type="button" class="quiet-button" data-week-hour="18">18 点</button></div>
           <span id="event-count"></span>
+          <label class="check-row visibility-control"><input type="checkbox" id="show-completed"><span>显示已完成</span></label>
         </div>
         <div id="calendar-canvas" class="calendar-canvas" tabindex="0" role="region" aria-label="日历日程"></div>
       </section>
@@ -107,7 +108,7 @@
       <section class="page" id="page-boya">
         <div class="page-heading"><h2>博雅课程</h2><span id="boya-count"></span></div>
         <div class="boya-toolbar"><div class="view-tabs"><button type="button" data-boya-tab="chosen" class="active">已报名</button><button type="button" data-boya-tab="catalog">课程列表</button></div><span id="boya-status"></span><button class="quiet-button" type="button" id="boya-sync"><i class="bi bi-arrow-repeat"></i>同步已报名</button></div>
-        <div class="boya-controls"><label class="check-row" id="boya-history-row"><input type="checkbox" id="boya-history"><span>显示已结束</span></label><label class="boya-interval">目录刷新<select id="boya-catalog-interval" aria-label="博雅目录刷新间隔"></select></label></div>
+        <div class="boya-controls"><div class="boya-visibility"><label class="check-row" id="boya-history-row"><input type="checkbox" id="boya-history"><span id="boya-history-label">显示已结束</span></label><label class="check-row" id="boya-only-self-row" hidden><input type="checkbox" id="boya-only-self"><span>仅自主签到</span></label></div><label class="boya-interval">目录刷新<select id="boya-catalog-interval" aria-label="博雅目录刷新间隔"></select></label></div>
         <div class="boya-filters" id="boya-filters" hidden><input type="search" id="boya-search" placeholder="搜索课程名称" aria-label="搜索博雅课程"><select id="boya-category" aria-label="课程分类"></select><select id="boya-campus" aria-label="适用校区"></select><select id="boya-sign-type" aria-label="签到方式"></select><select id="boya-filter-state" aria-label="报名状态"><option value="">全部状态</option><option value="available">可报名</option><option value="preview">未开放</option><option value="full">已满</option><option value="selected">已报名</option><option value="closed">报名结束</option><option value="ended">已结束</option><option value="unknown">状态未知</option></select></div>
         <div class="list-surface" id="boya-list"></div>
         <div class="boya-pager" id="boya-pager" hidden><button type="button" class="quiet-button" id="boya-page-prev" aria-label="上一页"><i class="bi bi-chevron-left"></i></button><span id="boya-page-number"></span><button type="button" class="quiet-button" id="boya-page-next" aria-label="下一页"><i class="bi bi-chevron-right"></i></button></div>
@@ -205,8 +206,10 @@
   <dialog id="calendar-detail-dialog" aria-labelledby="calendar-detail-title">
     <div class="calendar-detail-sheet"><div class="dialog-head"><h2 id="calendar-detail-title"></h2><button type="button" class="icon-button" data-close="calendar-detail-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div><div id="calendar-detail-body"></div></div>
   </dialog>
+  <dialog id="mobile-more-dialog" class="mobile-more-dialog" aria-labelledby="mobile-more-title"><div class="dialog-head"><h2 id="mobile-more-title">更多</h2><button class="icon-button" type="button" data-close="mobile-more-dialog" aria-label="关闭"><i class="bi bi-x-lg"></i></button></div><nav aria-label="更多模块"><a href="#alerts" data-more-page="alerts"><i class="bi bi-bell"></i><span>提醒规则</span><i class="bi bi-chevron-right"></i></a><a href="#connections" data-more-page="connections"><i class="bi bi-plug"></i><span>学校连接</span><i class="bi bi-chevron-right"></i></a><a href="#channels" data-more-page="channels"><i class="bi bi-send"></i><span>通知渠道</span><i class="bi bi-chevron-right"></i></a><a href="#account" data-more-page="account"><i class="bi bi-person-gear"></i><span>账户与安全</span><i class="bi bi-chevron-right"></i></a></nav></dialog>
   <div class="toast" id="toast" role="status"></div>
-  <script src="/boya.js?v=20261013-2" defer></script>
-  <script src="/app.js?v=20261013-2" defer></script>
+  <script src="/calendar.js?v=20261013-mobile-2" defer></script>
+  <script src="/boya.js?v=20261013-mobile-2" defer></script>
+  <script src="/app.js?v=20261013-mobile-2" defer></script>
 </body>
 </html>

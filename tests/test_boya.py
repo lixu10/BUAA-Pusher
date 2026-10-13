@@ -258,6 +258,24 @@ class BoyaApiTest(unittest.TestCase):
         self.assertEqual([], self.client.get("/api/events").json())
         self.assertEqual(409, self.client.post("/api/boya/catalog/sync").status_code)
 
+    def test_catalog_hides_ended_and_closed_even_if_registered_and_can_reveal_history(self):
+        now=datetime.now(UTC)
+        events=[course(1,remaining=1),course(2,remaining=2,courseSelectEndDate=(now-timedelta(minutes=1)).isoformat()),
+            course(3,remaining=2,courseStartDate=(now-timedelta(hours=2)).isoformat(),courseEndDate=(now-timedelta(hours=1)).isoformat()),
+            course(4,remaining=2,selected=True,courseSelectEndDate=(now-timedelta(minutes=1)).isoformat())]
+        self.db.replace_boya_catalog(self.user["id"],events)
+        self.assertEqual(["1"],[row["metadata"]["course_id"] for row in self.client.get("/api/boya/courses").json()["courses"]])
+        self.assertEqual(4,self.client.get("/api/boya/courses?include_expired=true").json()["total"])
+        # Filtering the catalog never removes the persisted data.
+        self.assertEqual(4,len(self.db.list_boya_courses(self.user["id"])))
+
+    def test_sign_mode_uses_school_regular_and_self_labels_not_signout_requirements(self):
+        self.db.save_boya_course(self.user["id"],course(1,remaining=1,courseSignType=2))
+        options=self.client.get("/api/dashboard").json()["boya_options"]["sign_types"]
+        self.assertEqual([{"value":"1","label":"常规签到"},{"value":"2","label":"自主签到"}],options)
+        self.assertEqual(1,self.client.get("/api/boya/courses?sign_type=2").json()["total"])
+        self.assertEqual(0,self.client.get("/api/boya/courses?sign_type=1").json()["total"])
+
     def test_boya_opt_in_and_catalog_interval_configuration(self):
         source = next(s for s in self.client.get("/api/dashboard").json()["sources"] if s["id"] == "bykc")
         self.assertTrue(source["available"]); self.assertFalse(source["enabled"])

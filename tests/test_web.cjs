@@ -81,6 +81,7 @@ function app() {
   const context = vm.createContext({ Intl, Date, Set, Map, console, setTimeout, clearTimeout,
     document: { querySelector: node, querySelectorAll: () => [], addEventListener() {} } });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/boya.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/calendar.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8'), context);
   return { context, elements, run: (code) => vm.runInContext(code, context) };
 }
@@ -187,10 +188,89 @@ test('week splits cross-midnight entries and paints overlapping entries in lanes
   assert.equal(ui.run('weekDayLayout(addDays(state.cursor,1)).every(item => item.top === 0 && item.continued)'), true);
 });
 
+test('week automatically folds empty edges but always reveals real early or late lessons',()=>{
+  const ui=app();ui.run('state.cursor=new Date(2030,8,2);');
+  assert.equal(ui.run('weekBounds().startHour'),8);assert.equal(ui.run('weekBounds().endHour'),22);
+  let html=ui.run('renderWeek()');assert.match(html,/data-week-expand="early"/);assert.match(html,/data-week-expand="late"/);
+  ui.run('state.data.events=[{id:1,kind:"assignment",due_at:new Date(2030,8,2,23,59).toISOString()}];');
+  assert.equal(ui.run('weekBounds().endHour'),22); // Deadline stays in the pinned area.
+  ui.run('state.data.events.push({id:2,kind:"course",starts_at:new Date(2030,8,3,6).toISOString(),ends_at:new Date(2030,8,3,7).toISOString()});');
+  assert.equal(ui.run('weekBounds().startHour'),0);
+  ui.run('state.data.events.push({id:3,kind:"boya",starts_at:new Date(2030,8,4,22).toISOString(),ends_at:new Date(2030,8,4,23).toISOString()});');
+  assert.equal(ui.run('weekBounds().endHour'),24);
+  html=ui.run('renderWeek()');assert.doesNotMatch(html,/data-week-expand/);
+});
+
+test('manual week expansion resets for another week and density never alters school times',()=>{
+  const ui=app();ui.run('state.cursor=new Date(2030,8,2);weekBounds();weekDisplay.early=true;weekDisplay.late=true;');
+  assert.equal(ui.run('weekBounds().startHour'),0);assert.equal(ui.run('weekBounds().endHour'),24);
+  ui.run('state.cursor=addDays(state.cursor,7);');assert.equal(ui.run('weekBounds().startHour'),8);
+  ui.run('state.data.events=[{id:1,kind:"course",starts_at:new Date(2030,8,9,9).toISOString(),ends_at:new Date(2030,8,9,10).toISOString()}];');
+  const original=ui.run('JSON.stringify(state.data.events)');ui.run('weekDisplay.comfortable=true;renderWeek();');
+  assert.equal(ui.run('weekBounds().hourHeight'),56);assert.equal(ui.run('JSON.stringify(state.data.events)'),original);
+  ui.run('state.page="calendar";$("#calendar-canvas").scrollTop=250;renderCalendar({resetScroll:true});');
+  assert.equal(ui.elements.get('#calendar-canvas').scrollTop,0);
+});
+
+test('mobile week shows all seven labelled dates and full-width selected day details',()=>{
+  const ui=app();ui.run(`state.cursor=new Date(2030,8,2);state.data.events=[
+    {id:1,kind:"course",source:"byxt",title:"Monday",starts_at:new Date(2030,8,2,9).toISOString(),ends_at:new Date(2030,8,2,10).toISOString(),location:"教室",metadata:{teacher:"教师"}},
+    {id:2,kind:"assignment",source:"spoc",title:"Tuesday",due_at:new Date(2030,8,3,23).toISOString()}
+  ];weekBounds();`);
+  let html=ui.run('renderMobileWeek(weekDays())');assert.equal((html.match(/data-week-day=/g)||[]).length,7);
+  assert.match(html,/Monday|教师|教室/);assert.doesNotMatch(html,/Tuesday/);
+  ui.run('weekDisplay.selectedDay=1;');html=ui.run('renderMobileWeek(weekDays())');
+  assert.match(html,/Tuesday/);assert.doesNotMatch(html,/Monday/);assert.match(html,/aria-pressed="true"/);
+});
+
+test('mobile navigation has four core labelled destinations plus a more menu',()=>{
+  const html=fs.readFileSync(path.join(__dirname,'../web/index.html'),'utf8');
+  const nav=html.match(/<nav class="nav"[\s\S]*?<\/nav>/)[0];
+  assert.equal((nav.match(/nav-secondary/g)||[]).length,3);assert.match(nav,/mobile-more-button/);
+  for(const title of ['今日','日历','待办','博雅','更多'])assert.ok(nav.includes(`<span>${title}</span>`));
+  for(const title of ['提醒规则','学校连接','通知渠道','账户与安全'])assert.ok(html.includes(title));
+  const css=fs.readFileSync(path.join(__dirname,'../web/styles.css'),'utf8');
+  assert.match(css,/\.sidebar \.nav \.nav-secondary\s*\{\s*display:none/);
+  assert.match(css,/\.topbar\s*\{\s*display:none/);
+  assert.ok(html.includes('id="today-sync"'));
+});
+
+test('compact desktop week fits useful hours while keeping a readable minimum',()=>{
+  const ui=app();ui.run('state.cursor=new Date(2030,8,2);$("#calendar-canvas").clientHeight=690;');
+  assert.equal(ui.run('weekBounds().hourHeight'),40);
+  ui.run('$("#calendar-canvas").clientHeight=300;');assert.equal(ui.run('weekBounds().hourHeight'),32);
+  ui.run('weekDisplay.comfortable=true;');assert.equal(ui.run('weekBounds().hourHeight'),56);
+});
+
+test('selecting a mobile weekday also changes the day view cursor',()=>{
+  const ui=app();ui.context.window={addEventListener(){}};
+  ui.run('state.cursor=new Date(2030,8,2);weekBounds();');
+  for(const selector of ['#calendar-canvas','#week-density','#week-reset-hours']){
+    ui.run(`$("${selector}");`);ui.elements.get(selector).addEventListener=function(type,listener){this[type]=listener;};
+  }
+  ui.run('bindWeekControls();');
+  ui.elements.get('#calendar-canvas').click({target:{closest:selector=>selector==='[data-week-day]'?{dataset:{weekDay:'2'}}:null}});
+  assert.equal(ui.run('state.cursor.getDay()'),3);
+  assert.equal(ui.run('weekDisplay.selectedDay'),2);
+});
+
+test('Boya chosen history is independent from catalog expired records',()=>{
+  const ui=app();ui.run(`state.data.events=[
+    {id:1,source:"bykc",kind:"boya",title:"Future",starts_at:"2030-09-01",ends_at:"2030-09-02",metadata:{course_id:"1",sign_type:"2"}},
+    {id:2,source:"bykc",kind:"boya",title:"Ended",starts_at:"2000-09-01",ends_at:"2000-09-02",metadata:{course_id:"2",sign_type:"1"}}
+  ];renderBoya();`);
+  assert.match(ui.elements.get('#boya-list').innerHTML,/Future|自主签到/);
+  assert.doesNotMatch(ui.elements.get('#boya-list').innerHTML,/Ended/);
+  ui.run('boyaView.chosenHistory=true;renderBoya();');assert.match(ui.elements.get('#boya-list').innerHTML,/Ended/);
+  ui.run('boyaView.tab="catalog";renderBoya();');
+  assert.equal(ui.elements.get('#boya-history').checked,false);
+  assert.equal(ui.elements.get('#boya-history-label').textContent,'显示已过期');
+});
+
 test('week preserves scroll across refresh, including midnight, without resetting on hidden page', () => {
   const ui = app();
   ui.run('renderCalendar();');
-  assert.equal(ui.elements.get('#calendar-canvas').scrollTop, 8 * 56);
+  assert.equal(ui.elements.get('#calendar-canvas').scrollTop, 0);
   ui.run('state.page = "calendar"; $("#calendar-canvas").scrollTop = 0; renderCalendar();');
   assert.equal(ui.elements.get('#calendar-canvas').scrollTop, 0);
   ui.run('state.weekScrollTop = 18 * 56; state.page = "tasks"; $("#calendar-canvas").scrollTop = 0; renderCalendar();');
@@ -314,7 +394,7 @@ test('Boya uses its own seven rule types and minute-level filtered catalog edito
   assert.equal(types.length,7); assert.ok(types.some(([id])=>id==='boya-seats'));
   assert.ok(types.some(([id])=>id==='boya-new-course'));
   assert.doesNotMatch(ui.run('renderBoyaRuleSettings("boya-enrollment-soon",profileDefaults("boya-enrollment-soon"))'),/再次提醒|同步仅建立基线/);
-  ui.run('state.data.boya_options={categories:[{value:"2",label:"美育"}],campuses:[{value:"1",label:"学院路"}],sign_types:[{value:"2",label:"签到＋签退"}]};');
+  ui.run('state.data.boya_options={categories:[{value:"2",label:"美育"}],campuses:[{value:"1",label:"学院路"}],sign_types:[{value:"2",label:"自主签到"}]};');
   const html=ui.run('renderBoyaRuleSettings("boya-enrollment-soon",{categories:["2"],sign_types:["2"],advance_minutes:[11,1]})');
   assert.match(html,/课程分类|适用校区|签到方式|报名开放前/);
   assert.match(html,/data-boya-filter="categories"[^>]+checked/);
@@ -326,7 +406,7 @@ test('Boya details keep long text collapsed and zero personal scores visible',()
   const ui=app();
   const html=ui.run('renderEventDetail({kind:"boya",source:"bykc",title:"博雅",metadata:{score:0,sign_type:"2",category_names:["美育"],campus_names:["学院路"],description:"<script>bad()</script>",homework_description:"要求",sign_windows:{signStartDate:"2030-09-01T10:00:00+08:00"}}})');
   assert.match(html,/<dt>得分<\/dt><dd>0<\/dd>/);
-  assert.match(html,/签到＋签退|签到开始|作业信息|详细说明/);
+  assert.match(html,/自主签到|签到开始|作业信息|详细说明/);
   assert.match(html,/&lt;script/); assert.doesNotMatch(html,/<script|<details[^>]*\bopen\b/);
 });
 

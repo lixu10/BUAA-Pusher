@@ -72,7 +72,7 @@ def message_body(context, event, timezone="Asia/Shanghai"):
     elif event["kind"] == "boya_catalog":
         field("分类", " / ".join(meta.get("category_names") or []))
         field("适用校区", "全部校区" if meta.get("all_campuses") else "、".join(meta.get("campus_names") or []))
-        field("签到方式", {"1": "仅签到", "2": "签到＋签退"}.get(meta.get("sign_type"), "未知"))
+        field("签到方式", {"1": "常规签到", "2": "自主签到"}.get(meta.get("sign_type"), "未知"))
         field("报名开始", date(meta.get("enrollment_starts_at")))
         field("距离报名开放", remaining(meta.get("enrollment_starts_at")) if profile == "boya-enrollment-soon" else None)
         field("报名截止", date(meta.get("enrollment_ends_at")))
@@ -87,7 +87,7 @@ def message_body(context, event, timezone="Asia/Shanghai"):
     if event["kind"] == "boya":
         field("分类", " / ".join(meta.get("category_names") or []))
         field("适用校区", "全部校区" if meta.get("all_campuses") else "、".join(meta.get("campus_names") or []))
-        field("签到方式", {"1": "仅签到", "2": "签到＋签退"}.get(meta.get("sign_type"), "未知"))
+        field("签到方式", {"1": "常规签到", "2": "自主签到"}.get(meta.get("sign_type"), "未知"))
         for key, label in {"signStartDate": "签到开始", "signEndDate": "签到结束", "signOutStartDate": "签退开始", "signOutEndDate": "签退结束"}.items():
             field(label, date((meta.get("sign_windows") or {}).get(key)))
         field("退选截止", date(meta.get("cancel_ends_at")))

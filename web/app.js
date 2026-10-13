@@ -4,7 +4,7 @@ const state = {
   page: "today", view: "week", cursor: new Date(), authMode: "login",
   taskStatus: "incomplete", taskSource: "", taskType: "", taskHistory: false, showCompleted: false,
   syncPending: new Set(),
-  weekScrollTop: 8 * 56, weekScrollLeft: 0,
+  weekScrollTop: 0, weekScrollLeft: 0,
 };
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -102,7 +102,7 @@ async function bootstrap() {
   try {
     const session = await api("/api/session");
     state.user = session.user; state.school = session.school; showApp(); await loadDashboard();
-    const initial = location.hash.slice(1); navigate(["today","calendar","tasks","boya","alerts","connections","channels","account"].includes(initial) ? initial : "today");
+    const initial = location.hash.slice(1)==="calender"?"calendar":location.hash.slice(1); navigate(["today","calendar","tasks","boya","alerts","connections","channels","account"].includes(initial) ? initial : "today");
   } catch (error) {
     if (error.status === 401) showAuth(); else toast("服务暂不可用");
   }
@@ -155,64 +155,6 @@ function renderToday() {
 
 function eventsForDay(date) { return visibleCalendarEvents().filter((event) => sameDay(eventDate(event), date)); }
 
-const WEEK_HOUR_HEIGHT = 56;
-function weekPinned(event) { return event.kind === "assignment" || event.all_day; }
-function weekPinnedDate(event) { return dateOf(event.kind === "assignment" ? event.due_at || anchor(event) : anchor(event)); }
-
-// Clip spanning events to each local day, and allocate lanes using their painted
-// height (not just duration) so short or simultaneous entries never cover one another.
-function weekDayLayout(day) {
-  const next = addDays(day, 1);
-  const items = visibleCalendarEvents().filter((event) => !weekPinned(event)).flatMap((event) => {
-    const start = eventDate(event); if (!start) return [];
-    const givenEnd = dateOf(event.ends_at);
-    const end = givenEnd && givenEnd > start ? givenEnd : new Date(start.getTime() + 45 * 60000);
-    if (start >= next || end <= day) return [];
-    const top = Math.max(0, (start - day) / 3600000 * WEEK_HOUR_HEIGHT);
-    const actualBottom = Math.min(24 * WEEK_HOUR_HEIGHT, (end - day) / 3600000 * WEEK_HOUR_HEIGHT);
-    const height = Math.min(Math.max(42, actualBottom - top), 24 * WEEK_HOUR_HEIGHT);
-    const paintedTop = Math.min(top, 24 * WEEK_HOUR_HEIGHT - height);
-    return [{ event, top: paintedTop, height, bottom: paintedTop + height, continued: start < day || end > next }];
-  }).sort((a,b) => a.top - b.top || b.height - a.height);
-  let group = [], groupEnd = -1;
-  const finish = () => {
-    const ends = [];
-    for (const item of group) {
-      let lane = ends.findIndex((end) => end <= item.top);
-      if (lane < 0) lane = ends.length;
-      ends[lane] = item.bottom; item.lane = lane;
-    }
-    group.forEach((item) => item.lanes = ends.length);
-    group = [];
-  };
-  for (const item of items) {
-    if (item.top >= groupEnd) finish();
-    group.push(item); groupEnd = Math.max(groupEnd, item.bottom);
-  }
-  finish(); return items;
-}
-
-function renderWeek() {
-  const start = startOfWeek(state.cursor), now = new Date();
-  const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
-  const heads = days.map((d) => `<span class="${sameDay(d, now) ? "is-today" : ""}">${"一二三四五六日"[(d.getDay() || 7) - 1]}<b>${d.getDate()}</b></span>`).join("");
-  const axis = Array.from({ length: 24 }, (_, i) => `<span>${String(i).padStart(2, "0")}:00</span>`).join("") + `<span class="time-end">24:00</span>`;
-  const pinned = days.map((day) => {
-    const items = visibleCalendarEvents().filter((event) => weekPinned(event) && sameDay(weekPinnedDate(event), day)).sort((a,b) => weekPinnedDate(a)-weekPinnedDate(b));
-    return `<div class="week-pinned-day">${items.map((event) => `<button type="button" class="week-deadline" data-calendar-event="${event.id}" title="${esc(event.title)}"><time>${event.all_day && event.kind !== "assignment" ? "全天" : fmtTime(event.due_at || anchor(event))}</time><strong>${esc(event.title)}</strong><span>${esc(statusLabel(event))}</span></button>`).join("") || `<span class="week-no-deadline">—</span>`}</div>`;
-  }).join("");
-  const columns = days.map((day) => {
-    const items = weekDayLayout(day).map(({event,top,height,lane,lanes,continued}) => {
-      const details = eventDetails(event);
-      const density = height < 74 ? "compact" : height < 94 ? "medium" : "full";
-      const tooltip = [event.title, eventTimeRange(event), details, statusLabel(event), attendanceLabel(event)].filter(Boolean).join("\n");
-      return `<button type="button" class="calendar-event ${density}" data-calendar-event="${event.id}" title="${esc(tooltip)}" aria-label="${esc(tooltip)}" style="top:${top}px;height:${height}px;left:calc(${lane / lanes * 100}% + 4px);width:calc(${100 / lanes}% - 8px)"><strong>${esc(event.title)}</strong><span class="calendar-event-time">${eventTimeRange(event)}${continued ? " · 跨日" : ""}</span>${details ? `<span class="calendar-event-meta">${esc(details)}</span>` : ""}<span class="calendar-event-status">${esc(statusLabel(event))}${attendanceLabel(event) ? ` · ${esc(attendanceLabel(event))}` : ""}</span></button>`;
-    }).join("");
-    const current = sameDay(day, now) ? `<div class="week-now" style="top:${(now.getHours() + now.getMinutes()/60) * WEEK_HOUR_HEIGHT}px" aria-label="当前时间 ${fmtTime(now)}"></div>` : "";
-    return `<div class="day-column">${items}${current}</div>`;
-  }).join("");
-  return `<div class="week-sticky"><div class="week-head"><span>时间</span>${heads}</div><div class="week-pinned"><span class="week-pinned-label">截止<br>／全天</span>${pinned}</div></div><div class="week-body"><div class="time-axis">${axis}</div>${columns}</div>`;
-}
 
 function bindEventDetails(container) {
   $$(`${container} [data-calendar-event]`).forEach((button) => button.addEventListener("click", () => openCalendarDetail(button.dataset.calendarEvent)));
@@ -279,13 +221,18 @@ function renderDay() {
   return events.length ? `<section class="agenda-group"><h3>${fmtDate(state.cursor, { year: "numeric", month: "long", day: "numeric", weekday: "long" })}</h3>${events.map(renderAgendaRow).join("")}</section>` : empty("这一天没有日程", "可以新建个人日程");
 }
 
-function renderCalendar() {
+function renderCalendar({resetScroll=false}={}) {
   const canvas = $("#calendar-canvas");
-  if (canvas.dataset.view === "week" && state.page === "calendar" && canvas.clientHeight > 0) { state.weekScrollTop = canvas.scrollTop; state.weekScrollLeft = canvas.scrollLeft; }
+  if (!resetScroll && canvas.dataset.view === "week" && state.page === "calendar" && canvas.clientHeight > 0) { state.weekScrollTop = canvas.scrollTop; state.weekScrollLeft = canvas.scrollLeft; }
+  if (resetScroll) { state.weekScrollTop=0; state.weekScrollLeft=0; }
   $("#event-count").textContent = `${visibleCalendarEvents().length} 项 · ${state.data.academic_window?.enabled ? `${state.data.academic_window.start} 至 ${state.data.academic_window.end || "不限"}` : "全部学期"}`;
   canvas.classList.toggle("is-week", state.view === "week"); canvas.dataset.view = state.view;
   canvas.innerHTML = state.view === "week" ? renderWeek() : state.view === "month" ? renderMonth() : state.view === "agenda" ? renderAgenda() : renderDay();
   $("#week-time-tools").hidden = state.view !== "week";
+  if (state.view === "week") {
+    const bounds=weekBounds(); $("#week-hours-label").textContent=`${String(bounds.startHour).padStart(2,"0")}:00–${bounds.endHour}:00`;
+    $("#week-density").textContent=weekDisplay.comfortable?"紧凑":"舒适";
+  }
   if (state.view === "week") { canvas.scrollTop = state.weekScrollTop; canvas.scrollLeft = state.weekScrollLeft; }
   else { canvas.scrollTop = 0; canvas.scrollLeft = 0; }
   bindEventDetails("#calendar-canvas");
@@ -534,15 +481,17 @@ function updateAcademicControls() {
 function navigate(page) {
   const previousPage = state.page;
   state.page = page; location.hash = page;
+  $("#app-shell").dataset.page=page;
   if (page === "today" && previousPage !== "today") state.cursor = new Date();
   $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.page === page));
+  $("#mobile-more-button").classList.toggle("active",["alerts","connections","channels","account"].includes(page));
   $$(".page").forEach((item) => item.classList.toggle("active", item.id === `page-${page}`));
   $("#add-button").hidden = !["today", "calendar"].includes(page);
   $("#previous-period").hidden = page !== "calendar"; $("#next-period").hidden = page !== "calendar"; $("#today-button").hidden = page !== "calendar";
   $("#show-completed").closest(".visibility-control").hidden = page !== "calendar";
   if (page === "today") renderToday();
   if (page === "boya") { renderBoya(); if (boyaView.tab === "catalog") loadBoyaCatalog(); }
-  if (page === "calendar" && state.view === "week") { $("#calendar-canvas").scrollTop = state.weekScrollTop; $("#calendar-canvas").scrollLeft = state.weekScrollLeft; }
+  if (page === "calendar") renderCalendar();
   updatePeriodTitle();
 }
 
@@ -755,7 +704,10 @@ function renderChannelFields() { $("#channel-fields").innerHTML = channelFieldSe
 
 function bindEvents() {
   bindBoyaEvents();
-  $$("[data-week-hour]").forEach((button) => button.addEventListener("click", () => { state.weekScrollTop = Number(button.dataset.weekHour) * WEEK_HOUR_HEIGHT; $("#calendar-canvas").scrollTop = state.weekScrollTop; }));
+  window.addEventListener("hashchange",()=>{const page=location.hash.slice(1)==="calender"?"calendar":location.hash.slice(1);if(state.user&&page!==state.page&&["today","calendar","tasks","boya","alerts","connections","channels","account"].includes(page))navigate(page);});
+  bindWeekControls();
+  $("#mobile-more-button").addEventListener("click",()=>$("#mobile-more-dialog").showModal());
+  $$('[data-more-page]').forEach(link=>link.addEventListener("click",event=>{event.preventDefault();$("#mobile-more-dialog").close();navigate(link.dataset.morePage);}));
   $("#calendar-canvas").addEventListener("scroll", (event) => { if (state.view === "week" && state.page === "calendar") { state.weekScrollTop = event.currentTarget.scrollTop; state.weekScrollLeft = event.currentTarget.scrollLeft; } }, {passive:true});
   $$("[data-task-status]").forEach((button) => button.addEventListener("click", () => { state.taskStatus = button.dataset.taskStatus; renderTasks(); }));
   $("#task-source").addEventListener("change", (event) => { state.taskSource = event.target.value; state.taskType = ""; renderTasks(); });
@@ -788,7 +740,7 @@ function bindEvents() {
   $$(".nav-item").forEach((item) => item.addEventListener("click", (event) => { event.preventDefault(); navigate(item.dataset.page); }));
   $("#user-button").addEventListener("click", () => navigate("account"));
   $$('[data-view]').forEach((button) => button.addEventListener("click", () => { state.view = button.dataset.view; renderCalendar(); updatePeriodTitle(); }));
-  $("#previous-period").addEventListener("click", () => movePeriod(-1)); $("#next-period").addEventListener("click", () => movePeriod(1)); $("#today-button").addEventListener("click", () => { state.cursor = new Date(); if (state.page === "today") renderToday(); else renderCalendar(); updatePeriodTitle(); });
+  $("#previous-period").addEventListener("click", () => movePeriod(-1)); $("#next-period").addEventListener("click", () => movePeriod(1)); $("#today-button").addEventListener("click", () => { state.cursor = new Date(); weekDisplay.selectedDay=null; if (state.page === "today") renderToday(); else renderCalendar(); updatePeriodTitle(); });
   $("#add-button").addEventListener("click", () => $("#event-dialog").showModal());
   $$('[data-close]').forEach((button) => button.addEventListener("click", () => $(`#${button.dataset.close}`).close()));
   $("#event-form").addEventListener("submit", async (event) => { event.preventDefault(); const formElement = event.currentTarget; const formData = new FormData(formElement); const values = Object.fromEntries(formData); ["starts_at","ends_at","due_at"].forEach((key) => { if (values[key]) values[key] = new Date(values[key]).toISOString(); else delete values[key]; }); values.all_day = formData.has("all_day"); if (!values.location) delete values.location; try { await api("/api/events", { method: "POST", body: JSON.stringify(values) }); $("#event-dialog").close(); formElement.reset(); await loadDashboard(); toast("日程已保存"); } catch { toast("保存失败"); } });
@@ -834,6 +786,7 @@ function bindEvents() {
   });
   $("#task-display-settings").addEventListener("click", () => { navigate("account"); $("#task-visibility-form").scrollIntoView({behavior:"smooth", block:"center"}); });
   $("#sync-button").addEventListener("click", (e) => state.page==='boya'?syncBoyaComponent():syncSources(e.currentTarget)); $("#source-sync").addEventListener("click", (e) => syncSources(e.currentTarget));
+  $("#today-sync").addEventListener("click",event=>syncSources(event.currentTarget));
   $("#logout-button").addEventListener("click", async () => { await api("/api/account/logout", { method: "POST" }); state.user = null; showAuth(); });
 }
 
