@@ -168,7 +168,7 @@ class TriggerDispatcher:
                 continue
             # Quiet-hour deferrals require no network work until their actual
             # delivery time. Checkpoint attendance already has its own reader.
-            if (self.catalog_refresher if catalog else self.source_refresher) and not signin and context["rule_enabled"] and not context.get("ignored") and (
+            if context["source"] != "custom" and (self.catalog_refresher if catalog else self.source_refresher) and not signin and context["rule_enabled"] and not context.get("ignored") and (
                 not self.enforce_feature_scope or (rule_available(context["definition"])
                     and (self.db.get_source(trigger["user_id"], context["source"]) or {}).get("enabled", True))
             ) and self._quiet_decision(trigger["user_id"], context["definition"].get("quiet_hours_policy", "delay")) is None:
@@ -199,6 +199,7 @@ class TriggerDispatcher:
                     processed += 1
                     continue
             event = {
+                "id": context.get("event_id"),
                 "title": context["title"], "kind": context["kind"], "source": context["source"],
                 "starts_at": context["starts_at"], "ends_at": context["ends_at"],
                 "due_at": context["due_at"], "status": context["event_status"],
@@ -206,6 +207,10 @@ class TriggerDispatcher:
                 "ignored": context.get("ignored", False),
             }
             definition = context["definition"]
+            if context["source"] == "custom" and not RuleEngine.matches_scope(definition["scope"], event):
+                self.db.finish_trigger(trigger["id"], "cancelled", "日程与提醒不匹配")
+                processed += 1
+                continue
             signin = definition.get("profile") == "signin"
             change = context.get("change")
             if catalog and definition.get("profile") == "boya-seats":

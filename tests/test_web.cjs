@@ -71,6 +71,54 @@ test('attendance labels attach to courses without replacing completion or adding
   assert.equal(ui.run('attendanceLabel({kind:"course",status:"pending"})'),"");
 });
 
+test('attendance only comes from an explicit course status or chosen Boya checkin field',()=>{
+  const ui=app();
+  for(const status of ['done','missing','unknown']) {
+    ui.context.event={kind:'course',status:'pending',attendance:{status}};
+    assert.equal(ui.run('attendanceLabel(event)'),({done:'已签到',missing:'未签到',unknown:'签到状态未知'})[status]);
+  }
+  for(const checkin of [0,1,'0','1',7]) {
+    ui.context.event={kind:'boya',metadata:{checkin}};
+    assert.equal(ui.run('attendanceLabel(event)'),checkin===0||checkin==='0'?'未签到':checkin===1||checkin==='1'?'已签到':'签到状态未知');
+  }
+  for(const event of [
+    {kind:'course',status:'done'}, {kind:'course',attendance:{}},
+    {kind:'course',attendance:{status:null}}, {kind:'course',attendance:{status:''}},
+    {kind:'boya',metadata:{}}, {kind:'boya',metadata:{checkin:null}},
+    {kind:'boya',metadata:{checkin:''}}, {kind:'boya',metadata:{pass:1,score:10,sign_type:'2'}},
+    {kind:'boya_catalog',metadata:{checkin:1}}, {kind:'assignment',metadata:{checkin:1}}
+  ]) {
+    ui.context.event=event;
+    assert.equal(ui.run('attendanceLabel(event)'),'');
+    assert.doesNotMatch(ui.run('statusBadge(event)'),/attendance-badge/);
+  }
+});
+
+test('day agenda and mobile selected day show one explicit attendance badge per known course',()=>{
+  const ui=app();
+  ui.run(`state.cursor=new Date(2030,8,2);state.data.events=[
+    {id:1,kind:'course',source:'byxt',title:'Signed',starts_at:new Date(2030,8,2,9).toISOString(),ends_at:new Date(2030,8,2,10).toISOString(),attendance:{status:'done'},metadata:{teacher:'教师'},location:'教室'},
+    {id:2,kind:'boya',source:'bykc',title:'Unsigned',starts_at:new Date(2030,8,2,11).toISOString(),ends_at:new Date(2030,8,2,12).toISOString(),metadata:{checkin:0}},
+    {id:3,kind:'course',source:'byxt',title:'No field',starts_at:new Date(2030,8,2,13).toISOString(),ends_at:new Date(2030,8,2,14).toISOString()},
+    {id:4,kind:'boya',source:'bykc',title:'Unknown',starts_at:new Date(2030,8,2,15).toISOString(),ends_at:new Date(2030,8,2,16).toISOString(),metadata:{checkin:null}}
+  ];weekBounds();`);
+  for(const render of ['renderDay()','renderMobileWeek(weekDays())']) {
+    const html=ui.run(render);
+    assert.equal((html.match(/attendance-badge/g)||[]).length,2);
+    assert.equal((html.match(/已签到/g)||[]).length,1);
+    assert.equal((html.match(/未签到/g)||[]).length,1);
+    assert.match(html,/attendance-badge complete/);
+    assert.match(html,/attendance-badge missing/);
+    assert.match(html,/No field|Unknown/);
+    assert.doesNotMatch(html,/签到状态未知/);
+  }
+  assert.match(ui.run('renderEventDetail(state.data.events[1])'),/<dt>签到<\/dt><dd>未签到<\/dd>/);
+  assert.doesNotMatch(ui.run('renderEventDetail(state.data.events[1])'),/<dt>考勤状态/);
+  const css=fs.readFileSync(path.join(__dirname,'../web/styles.css'),'utf8');
+  assert.match(css,/\.agenda-row > span\s*\{\s*display: none/);
+  assert.doesNotMatch(css,/\.agenda-row span(?::last-child)?\s*\{\s*display: none/);
+});
+
 function app() {
   const elements = new Map();
   const node = (selector) => {
@@ -82,9 +130,59 @@ function app() {
     document: { querySelector: node, querySelectorAll: () => [], addEventListener() {} } });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/boya.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/calendar.js'), 'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/custom-events.js'), 'utf8'), context);
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8'), context);
   return { context, elements, run: (code) => vm.runInContext(code, context) };
 }
+
+test('custom event reminders support multiple minute-precise start and end checkpoints',()=>{
+  const ui=app();
+  assert.equal(ui.run('customReminderPoint("before_start",1,2,3).offset_minutes'),-1563);
+  assert.equal(ui.run('customReminderPoint("before_end",0,0,5).anchor'),'ends_at');
+  assert.equal(ui.run('customReminderPoint("at_start").offset_minutes'),0);
+  assert.equal(ui.run('customReminderPoint("at_end").anchor'),'ends_at');
+  for(const code of ['customReminderPoint("before_start")','customReminderPoint("before_start",0,24,0)','customReminderPoint("before_start",0,0,1.5)','customReminderPoint("wrong",0,0,1)'])assert.throws(()=>ui.run(code));
+  const summary=ui.run('customReminderSummary({triggers:[{anchor:"starts_at",offset_minutes:-60},{anchor:"ends_at",offset_minutes:0}],actions:[{channel:"in_app"}]})');
+  assert.match(summary,/开始前1 小时|结束时|站内/);
+});
+
+function customForm({allDay=false,end='2030-09-02T10:00',reminder=false,points=[['before_start',0,0,15]],channels=['in_app']}={}) {
+  const entries={title:{value:'  个人会议  '},starts_at:{value:allDay?'2030-09-02':'2030-09-02T09:00'},ends_at:{value:end},all_day:{checked:allDay},location:{value:'线上'},description:{value:'<script>长备注</script>'},with_reminder:{checked:reminder},reminder_enabled:{checked:true},reminder_quiet_policy:{value:'ignore'}};
+  const rows=points.map(([timing,days,hours,minutes])=>({querySelector:selector=>({value:selector==='[data-custom-timing]'?timing:selector.includes('days')?days:selector.includes('hours')?hours:minutes})}));
+  return {elements:entries,querySelectorAll:selector=>selector==='.custom-reminder-time-row'?rows:channels.map(value=>({value}))};
+}
+test('custom event payload saves its own reminder or none and validates end and channel choices',()=>{
+  const ui=app();ui.context.form=customForm();
+  let value=ui.run('customEventPayload(form)');
+  assert.equal(value.title,'个人会议');assert.equal(value.kind,'custom');assert.equal(value.reminder,null);
+  assert.equal(value.description,'<script>长备注</script>');assert.ok(value.starts_at.endsWith('Z'));
+  ui.context.form=customForm({reminder:true,points:[['before_start',0,1,0],['before_end',0,0,5]],channels:['in_app','email:12']});
+  value=ui.run('customEventPayload(form)');assert.equal(value.reminder.times.length,2);assert.equal(value.reminder.actions[1].channel_id,12);
+  for(const config of [{reminder:true,channels:[]},{reminder:true,points:[['before_start',0,0,1],['before_start',0,0,1]]},{reminder:true,points:[['before_start',0,1,0],['before_end',0,2,0]]},{reminder:true,end:'',points:[['before_end',0,0,5]]},{end:'2030-09-01T09:00'}]) {
+    ui.context.form=customForm(config);assert.throws(()=>ui.run('customEventPayload(form)'));
+  }
+});
+test('all-day dates include the selected end date and custom descriptions remain escaped and collapsed',()=>{
+  const ui=app();ui.context.form=customForm({allDay:true,end:'2030-09-03'});
+  const value=ui.run('customEventPayload(form)');
+  assert.equal(new Date(value.ends_at).getDate(),4);assert.equal(new Date(value.starts_at).getDate(),2);
+  assert.equal(new Date(value.ends_at).getHours(),0);
+  ui.context.form=customForm({allDay:true,end:''});assert.equal(new Date(ui.run('customEventPayload(form).ends_at')).getDate(),3);
+  const html=ui.run('renderEventDetail({id:1,source:"custom",kind:"custom",status:"pending",starts_at:"2030-09-02T09:00:00",metadata:{description:"<script>文字</script>"}})');
+  assert.match(html,/自定义日程|未开始|&lt;script&gt;/);assert.doesNotMatch(html,/<script>|<details[^>]*open/);
+  assert.equal(ui.run('eventTimeRange({kind:"custom",all_day:true,starts_at:"2030-09-02"})'),'全天');
+});
+test('personal event controls are available on mobile and reminder cards edit only their bound event',()=>{
+  const ui=app();const html=fs.readFileSync(path.join(__dirname,'../web/index.html'),'utf8');
+  assert.ok((html.match(/data-new-event/g)||[]).length>=3);assert.doesNotMatch(html,/自定义日程 · Coming Soon/);
+  assert.match(html,/id="custom-reminder-settings" hidden disabled/);assert.match(html,/id="custom-reminder-times"/);
+  ui.run('state.data.rules=[{id:1,profile:"custom-event",enabled:true,scope:{event_ids:[3]},triggers:[{anchor:"starts_at",offset_minutes:-15}],actions:[{channel:"in_app"}]}];');
+  assert.match(ui.run('customEventDetailActions({id:3,source:"custom",kind:"custom"})'),/data-edit-custom-event="3"|15 分钟/);
+  assert.match(ui.run('customEventDetailActions({id:4,source:"custom",kind:"custom"})'),/未设置提醒/);
+  assert.equal(ui.run('customEventDetailActions({id:3,source:"byxt",kind:"course"})'),'');
+  const calls=[];ui.context.openCustomEventDialog=id=>calls.push(id);
+  ui.run('openRuleDialog(state.data.rules[0])');assert.deepEqual(calls,[3]);
+});
 
 test('shared details preserve zero scores and expose safe collapsed long content', () => {
   const ui = app();

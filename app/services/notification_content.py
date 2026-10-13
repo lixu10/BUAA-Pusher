@@ -38,7 +38,9 @@ def message_body(context, event, timezone="Asia/Shanghai"):
     labels = {"signin": "课程未签到", "boya-new-course": "新博雅课程", "boya-seats": "博雅名额回流", "boya-enrollment-open": "博雅报名已开放", "boya-enrollment-soon": "博雅报名即将开放", "boya-enrollment-closing": "博雅报名即将截止"}
     lines.append(labels.get(profile, "课程变更" if change and change["type"] == "course-change" else "作业评分更新" if change and change["type"] == "assignment-grade" else "新作业发布" if change and change["type"] == "new-assignment" else "作业截止提醒" if event["kind"] == "assignment" else "课程提醒" if event["kind"] in {"course", "boya"} else "事项提醒"))
     field("事项", event.get("title"))
-    field("来源", {"byxt": "教务课表", "bykc": "博雅课程", "spoc": "SPOC", "judge": "JUDGE", "iclass": "iClass"}.get("iclass" if profile == "signin" else event.get("source"), event.get("source")))
+    if event.get("source") == "custom":
+        lines[0] = "自定义日程提醒"
+    field("来源", {"byxt": "教务课表", "bykc": "博雅课程", "spoc": "SPOC", "judge": "JUDGE", "iclass": "iClass", "custom": "个人日程"}.get("iclass" if profile == "signin" else event.get("source"), event.get("source")))
     field("课程", meta.get("course_name"))
     teacher = meta.get("teacher")
     if isinstance(teacher, list):
@@ -58,6 +60,9 @@ def message_body(context, event, timezone="Asia/Shanghai"):
         field("签到状态", "未签到")
         field("检查时间", date((meta.get("_attendance") or {}).get("checked_at")) or date(datetime.now(UTC).isoformat()))
         field("距离课程结束", remaining(event.get("ends_at")))
+    elif event["kind"] == "custom":
+        field("日程状态", public_event(event)["status_label"])
+        field("距离开始", remaining(event.get("starts_at")))
     elif event["kind"] == "assignment":
         field("提交状态", public_event(event)["status_label"])
         field("作业类型", f"类型 {meta['assignment_type']}" if str(meta.get("assignment_type", "")).isdigit() else meta.get("assignment_type"))

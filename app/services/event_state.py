@@ -1,9 +1,11 @@
 """Shared display and reminder semantics; unknown never means submitted."""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 
 def completion_state(event: dict[str, Any]) -> str:
+    if event.get("kind") == "custom":
+        return "completed" if event.get("status") == "done" else "not_applicable"
     if event.get("kind") in {"course", "boya"}:
         return "not_applicable"
     metadata = event.get("metadata") or {}
@@ -47,12 +49,36 @@ def public_event(event: dict[str, Any]) -> dict[str, Any]:
                 pass
     if event.get("kind") == "signin" and state == "unsubmitted":
         label = "未签到"
+    if event.get("kind") == "custom":
+        label = "已完成" if state == "completed" else "已结束" if expired(event) else "未开始"
+        if label == "未开始" and event.get("starts_at"):
+            try:
+                start = datetime.fromisoformat(event["starts_at"].replace("Z", "+00:00"))
+                start = start.replace(tzinfo=UTC) if start.tzinfo is None else start
+                if start <= datetime.now(UTC):
+                    label = "进行中" if event.get("ends_at") else "已到时间"
+            except (ValueError, TypeError):
+                pass
     return {**event, "ignored": bool(event.get("ignored")), "completion_state": state,
             "status_label": "已忽略" if event.get("ignored") else label, "expired": expired(event)}
 
 
 def reminder_matches(rule: dict[str, Any], event: dict[str, Any], now: datetime | None = None) -> bool:
     if event.get("ignored"):
+        return False
+    if event.get("kind") == "custom":
+        if event.get("status") == "done":
+            return False
+        if not expired(event, now):
+            return True
+        # An exact end-time reminder needs a short worker-poll grace period.
+        if any(point.get("anchor") == "ends_at" and point.get("offset_minutes") == 0 for point in rule.get("triggers", [])):
+            try:
+                end = datetime.fromisoformat(event["ends_at"].replace("Z", "+00:00"))
+                end = end.replace(tzinfo=UTC) if end.tzinfo is None else end
+                return (now or datetime.now(UTC)) <= end + timedelta(seconds=30)
+            except (ValueError, TypeError):
+                pass
         return False
     if event.get("kind") in {"course", "boya"}:
         return not expired(event, now)

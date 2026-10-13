@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Literal
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 
 import re
 
@@ -45,17 +45,6 @@ class SchoolLoginRequest(BaseModel):
     source_id: str | None = Field(default=None, max_length=20)
 
 
-class EventCreate(BaseModel):
-    title: str = Field(min_length=1, max_length=120)
-    kind: str = Field(default="custom", max_length=40)
-    starts_at: str | None = None
-    ends_at: str | None = None
-    due_at: str | None = None
-    all_day: bool = False
-    location: str | None = Field(default=None, max_length=120)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-
 class SourceUpdate(BaseModel):
     enabled: bool | None = None
     refresh_interval_minutes: int | None = Field(default=None, ge=0, le=1440)
@@ -79,6 +68,14 @@ class RuleUpdate(BaseModel):
 class RuleScope(BaseModel):
     kinds: list[str] = Field(default_factory=list)
     sources: list[str] = Field(default_factory=list)
+    event_ids: list[int] = Field(default_factory=list, max_length=100)
+
+    @field_validator("event_ids")
+    @classmethod
+    def positive_event_ids(cls, value):
+        if any(event_id < 1 for event_id in value):
+            raise ValueError("日程编号无效")
+        return list(dict.fromkeys(value))
 
 
 class RuleTrigger(BaseModel):
@@ -104,6 +101,66 @@ class RuleAction(BaseModel):
     channel: str = Field(min_length=1, max_length=40)
     channel_id: int | None = None
     after_minutes: int = Field(default=0, ge=0, le=10080)
+
+
+class CustomReminderPoint(BaseModel):
+    anchor: Literal["starts_at", "ends_at"]
+    offset_minutes: int = Field(ge=-525600, le=0, strict=True)
+
+
+class CustomEventReminder(BaseModel):
+    enabled: bool = True
+    times: list[CustomReminderPoint] = Field(min_length=1, max_length=10)
+    actions: list[RuleAction] = Field(min_length=1, max_length=10)
+    quiet_hours_policy: Literal["delay", "skip", "ignore"] = "delay"
+
+    @model_validator(mode="after")
+    def unique_choices(self):
+        if len({(point.anchor, point.offset_minutes) for point in self.times}) != len(self.times):
+            raise ValueError("提醒时间点不能重复")
+        if len({(action.channel, action.channel_id) for action in self.actions}) != len(self.actions):
+            raise ValueError("通知方式不能重复")
+        if any(action.after_minutes for action in self.actions):
+            raise ValueError("请添加提醒时间点，不使用延后通知")
+        return self
+
+
+class EventCreate(BaseModel):
+    model_config = {"extra": "forbid"}
+    title: str = Field(min_length=1, max_length=120)
+    kind: Literal["custom"] = "custom"
+    starts_at: datetime
+    ends_at: datetime | None = None
+    all_day: bool = False
+    location: str | None = Field(default=None, max_length=120)
+    description: str = Field(default="", max_length=20000)
+    reminder: CustomEventReminder | None = None
+
+    @field_validator("title")
+    @classmethod
+    def meaningful_title(cls, value):
+        if not value.strip():
+            raise ValueError("请填写日程名称")
+        return value.strip()
+
+    @field_validator("starts_at", "ends_at")
+    @classmethod
+    def aware_time(cls, value):
+        if value is not None and value.tzinfo is None:
+            raise ValueError("日程时间需要包含时区")
+        return value.astimezone(UTC) if value is not None else value
+
+    @model_validator(mode="after")
+    def valid_times(self):
+        if self.ends_at is not None and self.ends_at <= self.starts_at:
+            raise ValueError("结束时间必须晚于开始时间")
+        if self.reminder and any(point.anchor == "ends_at" for point in self.reminder.times) and self.ends_at is None:
+            raise ValueError("结束前提醒需要设置结束时间")
+        if self.reminder:
+            actual_times = [getattr(self, point.anchor) + timedelta(minutes=point.offset_minutes) for point in self.reminder.times]
+            if len(set(actual_times)) != len(actual_times):
+                raise ValueError("提醒时间点不能重复")
+        return self
 
 
 class AutomationRuleCreate(BaseModel):
@@ -266,8 +323,8 @@ class PreferencesUpdate(BaseModel):
     academic_filter_enabled: bool = True
     academic_start_date: date | None = None
     academic_end_date: date | None = None
-    task_visible_kinds: list[Literal["assignment", "course", "boya"]] = Field(default_factory=lambda: ["assignment"], max_length=3)
-    task_visible_sources: list[Literal["spoc", "judge", "byxt", "bykc"]] = Field(default_factory=lambda: ["spoc", "judge", "byxt", "bykc"], max_length=4)
+    task_visible_kinds: list[Literal["assignment", "course", "boya", "custom"]] = Field(default_factory=lambda: ["assignment"], max_length=4)
+    task_visible_sources: list[Literal["spoc", "judge", "byxt", "bykc", "custom"]] = Field(default_factory=lambda: ["spoc", "judge", "byxt", "bykc"], max_length=5)
 
     @field_validator("task_visible_kinds", "task_visible_sources")
     @classmethod

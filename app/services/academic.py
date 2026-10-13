@@ -22,7 +22,7 @@ def academic_window(preferences: dict[str, Any], now: datetime | None = None) ->
 
 
 def in_academic_window(event: dict[str, Any], window: dict[str, Any]) -> bool:
-    if not window["enabled"]:
+    if event.get("source") == "custom" or not window["enabled"]:
         return True
     raw = event.get("due_at") or event.get("starts_at") or (event.get("metadata") or {}).get("opens_at")
     if not raw:

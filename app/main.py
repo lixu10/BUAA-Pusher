@@ -664,10 +664,56 @@ def events(
 
 @app.post("/api/events", status_code=201)
 def create_event(payload: EventCreate, user: dict[str, Any] = Depends(csrf_user)):
-    require_available(False)
-    event = db.create_custom_event(user["id"], payload.model_dump())
+    event = save_personal_event(user["id"], payload)
     rule_engine.plan_user(user["id"])
+    db.audit(user["id"], "create", "event", str(event["id"]))
+    return custom_event_result(user["id"], event)
+
+
+def custom_event_result(user_id: int, event: dict) -> dict:
+    rule = db.custom_event_rule(user_id, event["id"])
+    reminder = {"rule_id": rule["id"], "enabled": rule["enabled"], "times": rule["triggers"],
+                "actions": rule["actions"], "quiet_hours_policy": rule["quiet_hours_policy"]} if rule else None
+    return {**public_event(event), "description": event["metadata"].get("description", ""), "reminder": reminder}
+
+
+def save_personal_event(user_id: int, payload: EventCreate, event_id: int | None = None) -> dict:
+    if payload.reminder:
+        for action in payload.reminder.actions:
+            if action.channel == "in_app" and action.channel_id is None:
+                continue
+            channel = db.get_channel(user_id, action.channel_id) if action.channel_id is not None else None
+            if not channel or not channel["enabled"] or channel["type"] != action.channel:
+                raise HTTPException(status_code=422, detail="请选择本人已启用的通知渠道")
+    values = payload.model_dump(mode="json", exclude={"reminder", "description"})
+    values["metadata"] = {"description": payload.description}
+    event = db.save_custom_event(user_id, values, payload.reminder.model_dump() if payload.reminder else None, event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="日程不存在")
     return event
+
+
+@app.get("/api/events/{event_id}")
+def custom_event_detail(event_id: int, user: dict = Depends(current_user)):
+    event = db.event_by_id(user["id"], event_id)
+    if not event or event["source"] != "custom" or event["kind"] != "custom":
+        raise HTTPException(status_code=404, detail="日程不存在")
+    return custom_event_result(user["id"], event)
+
+
+@app.put("/api/events/{event_id}")
+def edit_custom_event(event_id: int, payload: EventCreate, user: dict = Depends(csrf_user)):
+    event = save_personal_event(user["id"], payload, event_id)
+    rule_engine.plan_user(user["id"])
+    db.audit(user["id"], "update", "event", str(event_id))
+    return custom_event_result(user["id"], event)
+
+
+@app.delete("/api/events/{event_id}", status_code=204)
+def delete_custom_event(event_id: int, user: dict = Depends(csrf_user)):
+    if not db.delete_custom_event(user["id"], event_id):
+        raise HTTPException(status_code=404, detail="日程不存在")
+    db.audit(user["id"], "delete", "event", str(event_id))
 
 
 @app.patch("/api/events/{event_id}/ignore")
@@ -747,6 +793,8 @@ def rules(user: dict[str, Any] = Depends(current_user)):
 
 @app.post("/api/rules", status_code=201)
 def create_rule(payload: AutomationRuleCreate, user: dict[str, Any] = Depends(csrf_user)):
+    if payload.profile == "custom-event":
+        raise HTTPException(status_code=422, detail="请在自定义日程中设置提醒")
     if not rule_available(payload.model_dump()):
         raise HTTPException(status_code=403, detail="Coming Soon")
     rule = db.create_automation_rule(user["id"], payload.model_dump())
@@ -758,6 +806,8 @@ def create_rule(payload: AutomationRuleCreate, user: dict[str, Any] = Depends(cs
 @app.put("/api/rules/{rule_id}")
 def replace_rule(rule_id: int, payload: AutomationRuleCreate, user: dict[str, Any] = Depends(csrf_user)):
     current = db.get_automation_rule(user["id"], rule_id)
+    if payload.profile == "custom-event" or current and current.get("profile") == "custom-event":
+        raise HTTPException(status_code=422, detail="请在自定义日程中设置提醒")
     if current and (not rule_available(payload.model_dump()) or
             (not rule_available(current) and not (public_rule(current)["availability"] == "needs_configuration" and payload.profile == "signin"))):
         raise HTTPException(status_code=403, detail="Coming Soon")
@@ -772,6 +822,8 @@ def replace_rule(rule_id: int, payload: AutomationRuleCreate, user: dict[str, An
 @app.patch("/api/rules/{rule_id}")
 def update_rule(rule_id: int, payload: AutomationRuleUpdate, user: dict[str, Any] = Depends(csrf_user)):
     current = db.get_automation_rule(user["id"], rule_id)
+    if (payload.profile == "custom-event" or current and current.get("profile") == "custom-event") and set(payload.model_fields_set) - {"enabled"}:
+        raise HTTPException(status_code=422, detail="请在自定义日程中修改提醒")
     if current and (not rule_available(current) or not rule_available({
         **current, **payload.model_dump(exclude_unset=True)
     })):

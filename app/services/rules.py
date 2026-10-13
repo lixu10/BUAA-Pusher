@@ -119,7 +119,8 @@ class RuleEngine:
     def matches_scope(scope: dict[str, Any], event: dict[str, Any]) -> bool:
         kinds = scope.get("kinds") or []
         sources = scope.get("sources") or []
-        return (not kinds or event.get("kind") in kinds) and (not sources or event.get("source") in sources)
+        event_ids = scope.get("event_ids") or []
+        return (not kinds or event.get("kind") in kinds) and (not sources or event.get("source") in sources) and (not event_ids or event.get("id") in event_ids)
 
     @classmethod
     def conditions_match(cls, conditions: list[dict[str, Any]], event: dict[str, Any]) -> bool:

@@ -78,7 +78,8 @@ class FeatureApiTest(unittest.TestCase):
             self.assertEqual(404 if source == "custom" else 403, response.status_code)
             if source != "custom":
                 self.assertEqual("Coming Soon", response.json()["detail"])
-        self.assertEqual(403, self.client.post("/api/events", json={"title": "个人日程"}).status_code)
+        self.assertEqual(422, self.client.post("/api/events", json={"title": "个人日程"}).status_code)
+        self.assertEqual(201, self.client.post("/api/events", json={"title": "个人日程", "starts_at": "2030-10-07T10:00:00+08:00"}).status_code)
         self.assertEqual(403, self.client.post("/api/rules", json=definition("grade", "grade")).status_code)
         self.assertEqual(201, self.client.post("/api/rules", json=definition()).status_code)
         self.assertEqual(200, self.client.patch("/api/sources/iclass", json={"enabled": True}).status_code)

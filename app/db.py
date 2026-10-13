@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -137,6 +138,11 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_automation_rules_user
                     ON automation_rules(user_id, enabled);
+                CREATE TABLE IF NOT EXISTS custom_event_reminders (
+                    user_id INTEGER NOT NULL REFERENCES puaa_users(id) ON DELETE CASCADE,
+                    event_id INTEGER PRIMARY KEY REFERENCES calendar_events(id) ON DELETE CASCADE,
+                    rule_id INTEGER NOT NULL UNIQUE REFERENCES automation_rules(id) ON DELETE CASCADE
+                );
                 CREATE TABLE IF NOT EXISTS notification_channels (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL REFERENCES puaa_users(id) ON DELETE CASCADE,
@@ -487,6 +493,63 @@ class Database:
             "SELECT * FROM calendar_events WHERE user_id=? AND source='custom' AND external_id=?",
             (user_id, external_id),
         ))
+
+    def custom_event_rule(self, user_id: int, event_id: int) -> dict[str, Any] | None:
+        row = self._one("SELECT r.* FROM automation_rules r JOIN custom_event_reminders c ON c.rule_id=r.id "
+                        "WHERE c.user_id=? AND c.event_id=? AND r.user_id=?", (user_id, event_id, user_id))
+        return self._decode_rule(row) if row else None
+
+    def save_custom_event(self, user_id: int, event: dict[str, Any], reminder: dict | None,
+                          event_id: int | None = None) -> dict[str, Any] | None:
+        """Persist the private event and its single-event rule in one transaction."""
+        now = now_iso()
+        with self._lock, self._connection:
+            values = (event["title"], event["starts_at"], event.get("ends_at"), int(event.get("all_day", False)),
+                      event.get("location"), json.dumps(event.get("metadata") or {}, ensure_ascii=False), now)
+            if event_id is None:
+                cursor = self._connection.execute(
+                    "INSERT INTO calendar_events(user_id,source,external_id,kind,title,starts_at,ends_at,all_day,location,metadata,updated_at) "
+                    "VALUES(?,'custom',?,'custom',?,?,?,?,?,?,?)", (user_id, f"custom-{uuid.uuid4().hex}", *values))
+                event_id = int(cursor.lastrowid)
+            else:
+                cursor = self._connection.execute(
+                    "UPDATE calendar_events SET title=?,starts_at=?,ends_at=?,all_day=?,location=?,metadata=?,updated_at=? "
+                    "WHERE user_id=? AND id=? AND source='custom' AND kind='custom'", (*values, user_id, event_id))
+                if not cursor.rowcount:
+                    return None
+            link = self._connection.execute("SELECT rule_id FROM custom_event_reminders WHERE user_id=? AND event_id=?",
+                                            (user_id, event_id)).fetchone()
+            if reminder is None:
+                if link:
+                    self._connection.execute("DELETE FROM automation_rules WHERE user_id=? AND id=?", (user_id, link["rule_id"]))
+            else:
+                definition = {"profile": "custom-event", "profile_settings": {},
+                              "scope": {"kinds": ["custom"], "sources": ["custom"], "event_ids": [event_id]},
+                              "triggers": reminder["times"], "trigger": reminder["times"][0],
+                              "conditions": [], "cancel_conditions": [], "repeat": {"max_count": 1},
+                              "actions": reminder["actions"], "quiet_hours_policy": reminder["quiet_hours_policy"]}
+                rule_values = (event["title"][:70] + " · 提醒", int(reminder["enabled"]), json.dumps(definition, ensure_ascii=False), now)
+                if link:
+                    self._connection.execute("UPDATE automation_rules SET name=?,enabled=?,definition=?,updated_at=? WHERE user_id=? AND id=?",
+                                             (*rule_values, user_id, link["rule_id"]))
+                    self._connection.execute("DELETE FROM scheduled_triggers WHERE user_id=? AND rule_id=? AND status='queued'",
+                                             (user_id, link["rule_id"]))
+                else:
+                    cursor = self._connection.execute("INSERT INTO automation_rules(name,enabled,definition,updated_at,user_id,created_at) VALUES(?,?,?,?,?,?)",
+                                                      (*rule_values, user_id, now))
+                    self._connection.execute("INSERT INTO custom_event_reminders VALUES(?,?,?)", (user_id, event_id, cursor.lastrowid))
+        return self.event_by_id(user_id, event_id)
+
+    def delete_custom_event(self, user_id: int, event_id: int) -> bool:
+        with self._lock, self._connection:
+            event = self._connection.execute("SELECT id FROM calendar_events WHERE user_id=? AND id=? AND source='custom' AND kind='custom'",
+                                             (user_id, event_id)).fetchone()
+            if not event:
+                return False
+            self._connection.execute("DELETE FROM automation_rules WHERE user_id=? AND id IN "
+                                     "(SELECT rule_id FROM custom_event_reminders WHERE user_id=? AND event_id=?)", (user_id, user_id, event_id))
+            self._connection.execute("DELETE FROM calendar_events WHERE user_id=? AND id=?", (user_id, event_id))
+        return True
 
     def list_events(self, user_id: int, start: str | None = None, end: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
         clauses = ["user_id=?"]

@@ -69,7 +69,7 @@ async function syncBoyaComponent() {
 }
 function renderBoyaDetail(event) {
   const meta=event.metadata || {}, windows=meta.sign_windows || {};
-  const fields=[['分类',(meta.category_names||[]).join(' / ')],['适用校区',boyaCampus(meta)],['签到方式',boyaSignType(meta)],['报名开始',detailDate(meta.enrollment_starts_at)],['报名截止',detailDate(meta.enrollment_ends_at)],['退选截止',detailDate(meta.cancel_ends_at)],['余量',meta.remaining],['已报名人数',meta.current_count],['人数上限',meta.max_count],['报名时间',detailDate(meta.enrolled_at)],['联系人',meta.contact],['联系电话',meta.contact_phone],['开课单位',meta.department],['考核',meta.pass===1?'已通过':meta.pass===0?'未通过／未完成':null],['得分',meta.score],['考勤状态',meta.checkin===0?'未签到':meta.checkin===1?'已签到':meta.checkin!==null&&meta.checkin!==undefined?`学校状态 ${meta.checkin}`:null]];
+  const fields=[['分类',(meta.category_names||[]).join(' / ')],['适用校区',boyaCampus(meta)],['签到方式',boyaSignType(meta)],['报名开始',detailDate(meta.enrollment_starts_at)],['报名截止',detailDate(meta.enrollment_ends_at)],['退选截止',detailDate(meta.cancel_ends_at)],['余量',meta.remaining],['已报名人数',meta.current_count],['人数上限',meta.max_count],['报名时间',detailDate(meta.enrolled_at)],['联系人',meta.contact],['联系电话',meta.contact_phone],['开课单位',meta.department],['考核',meta.pass===1?'已通过':meta.pass===0?'未通过／未完成':null],['得分',meta.score]];
   let html=`<dl class="boya-detail-fields">${detailFields(fields)}</dl>`;
   const signFields=detailFields([['签到开始',detailDate(windows.signStartDate)],['签到结束',detailDate(windows.signEndDate)],['签退开始',detailDate(windows.signOutStartDate)],['签退结束',detailDate(windows.signOutEndDate)],['学校备注',meta.sign_info]]);
   html+=detailDisclosure('签到／签退信息',signFields?`<dl>${signFields}</dl>`:'');

@@ -15,6 +15,8 @@ ACTIVE_PROFILES = frozenset({"assignment", "course", "signin", "spoc-assignment"
 
 
 def event_available(event: dict[str, Any]) -> bool:
+    if event.get("source") == "custom":
+        return event.get("kind") == "custom"
     if event.get("source") == "bykc":
         return event.get("kind") in {"boya", "boya_catalog"}
     expected = "course" if event.get("source") == "byxt" else "assignment"
@@ -25,6 +27,11 @@ def rule_available(rule: dict[str, Any]) -> bool:
     scope = rule.get("scope") or {}
     kinds, sources = set(scope.get("kinds") or []), set(scope.get("sources") or [])
     profile = rule.get("profile")
+    if profile == "custom-event":
+        event_ids = scope.get("event_ids") or []
+        return sources == {"custom"} and kinds == {"custom"} and len(event_ids) == 1 and type(event_ids[0]) is int and event_ids[0] > 0
+    if "custom" in sources or "custom" in kinds:
+        return False
     if profile == "signin":
         return sources == {"iclass"} and kinds == {"signin"} and bool((rule.get("profile_settings") or {}).get("check_times"))
     if "iclass" in sources or "signin" in kinds:

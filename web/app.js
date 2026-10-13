@@ -52,6 +52,7 @@ function isCompleted(event) { return event.status === "done" || ["submitted", "c
 function isExpired(event) { const end = dateOf(event.kind === "assignment" ? event.due_at : event.ends_at); return Boolean(end && end < new Date()); }
 function statusLabel(event) {
   if (event.ignored) return "已忽略";
+  if (event.kind === "custom") return event.status_label || (isCompleted(event) ? "已完成" : isExpired(event) ? "已结束" : dateOf(event.starts_at) && dateOf(event.starts_at) <= new Date() ? event.ends_at ? "进行中" : "已到时间" : "未开始");
   if (["course","boya"].includes(event.kind)) return event.status_label || (isExpired(event) ? "已结束" : dateOf(event.starts_at) && dateOf(event.starts_at) <= new Date() ? "上课中" : "待上课");
   if (event.kind === "boya_catalog") return boyaStateLabels[event.enrollment_state] || "状态未知";
   let label = event.status_label || ({ done: event.kind === "signin" ? "已签到" : "已提交", pending: "未提交", missing: "未签到", partial: "部分提交" })[event.status] || "状态未知";
@@ -59,10 +60,28 @@ function statusLabel(event) {
   if (meta.total_problems) label += ` ${meta.submitted_count || 0}/${meta.total_problems}`;
   return label;
 }
-function attendanceLabel(event) { return event.kind === "course" && event.attendance ? ({done:"已签到",missing:"未签到",unknown:"签到状态未知"})[event.attendance.status] || "签到状态未知" : ""; }
-function statusBadge(event) { return `<span class="task-status ${event.ignored ? "ignored" : isCompleted(event) ? "complete" : ""}">${esc(statusLabel(event))}</span>${attendanceLabel(event) ? `<span class="attendance-badge ${event.attendance.status === "done" ? "complete" : ""}">${esc(attendanceLabel(event))}</span>` : ""}`; }
+function attendanceLabel(event) {
+  if (event.kind === "course") {
+    const status = event.attendance?.status;
+    if (status === null || status === undefined || status === "") return "";
+    return ({done:"已签到",missing:"未签到",unknown:"签到状态未知"})[status] || "签到状态未知";
+  }
+  if (event.kind === "boya") {
+    const checkin = event.metadata?.checkin;
+    if (checkin === null || checkin === undefined || checkin === "") return "";
+    if (checkin === 1 || checkin === "1") return "已签到";
+    if (checkin === 0 || checkin === "0") return "未签到";
+    return "签到状态未知";
+  }
+  return "";
+}
+function attendanceBadge(event) {
+  const label = attendanceLabel(event);
+  return label ? `<span class="attendance-badge ${label === "已签到" ? "complete" : label === "未签到" ? "missing" : ""}">${esc(label)}</span>` : "";
+}
+function statusBadge(event) { return `<span class="task-status ${event.ignored ? "ignored" : isCompleted(event) ? "complete" : ""}">${esc(statusLabel(event))}</span>${attendanceBadge(event)}`; }
 function visibleCalendarEvents() { return state.data.events.filter((event) => !event.ignored && (state.showCompleted || !isCompleted(event))); }
-function sourceLabel(id) { return ({ spoc: "SPOC", judge: "JUDGE", byxt: "课程提醒", iclass: "课程签到", bykc: "博雅课程" })[id] || id; }
+function sourceLabel(id) { return ({ spoc: "SPOC", judge: "JUDGE", byxt: "课程提醒", iclass: "课程签到", bykc: "博雅课程", custom: "自定义日程" })[id] || id; }
 function assignmentTypeLabel(type) { return /^\d+$/.test(String(type)) ? `类型 ${type}` : String(type); }
 function typeOptions(selected = "", source = "") {
   const types = [...new Set(state.data.events.filter((event) => event.kind === "assignment" && (!source || event.source === source)).map((event) => event.metadata?.assignment_type).filter(Boolean))].sort();
@@ -78,12 +97,13 @@ function eventTeacher(event) {
   return value ? String(value) : "";
 }
 function eventTimeRange(event) {
+  if (event.kind === "custom" && event.all_day) return "全天";
   const start = fmtTime(event.starts_at || event.due_at || event.ends_at);
   const end = event.ends_at && event.starts_at ? fmtTime(event.ends_at) : "";
   return end && end !== start ? `${start}–${end}` : start;
 }
-function eventDetails(event) {
-  return [eventTeacher(event), event.location, attendanceLabel(event)].filter(Boolean).join("　");
+function eventDetails(event, {includeAttendance=true}={}) {
+  return [eventTeacher(event), event.location, includeAttendance ? attendanceLabel(event) : ""].filter(Boolean).join("　");
 }
 
 function empty(title, detail, icon = "bi-calendar2") {
@@ -196,7 +216,8 @@ function openCalendarDetail(id) {
   const event = state.data.events.find((item) => String(item.id) === String(id));
   if (!event) return;
   $("#calendar-detail-title").textContent = event.title;
-  $("#calendar-detail-body").innerHTML = renderEventDetail(event);
+  $("#calendar-detail-body").innerHTML = renderEventDetail(event) + customEventDetailActions(event);
+  bindCustomDetailActions();
   $("#calendar-detail-dialog").showModal();
 }
 
@@ -213,7 +234,7 @@ function renderAgenda() {
 }
 
 function renderAgendaRow(event) {
-  return `<div class="agenda-row"><b>${eventTimeRange(event)}</b><div><button type="button" class="event-detail-link" data-calendar-event="${event.id}">${esc(event.title)}</button> ${statusBadge(event)}</div><span>${esc(eventTeacher(event) || "—")}</span><span>${esc(event.location || "—")}</span></div>`;
+  return `<div class="agenda-row"><b>${eventTimeRange(event)}</b><div><button type="button" class="event-detail-link" data-calendar-event="${event.id}">${esc(event.title)}</button><div class="agenda-status">${statusBadge(event)}</div></div><span>${esc(eventTeacher(event) || "—")}</span><span>${esc(event.location || "—")}</span></div>`;
 }
 
 function renderDay() {
@@ -243,7 +264,7 @@ function renderTasks() {
   const prefs = state.data.preferences || {};
   const visibleKinds = prefs.task_visible_kinds ?? ["assignment"];
   const visibleSources = prefs.task_visible_sources ?? ["spoc", "judge", "byxt", "bykc"];
-  const sourceKinds={spoc:"assignment",judge:"assignment",byxt:"course",bykc:"boya"};
+  const sourceKinds={spoc:"assignment",judge:"assignment",byxt:"course",bykc:"boya",custom:"custom"};
   const sourceChoices=Object.keys(sourceKinds).filter(source=>visibleSources.includes(source)&&visibleKinds.includes(sourceKinds[source]));
   if (state.taskSource && !sourceChoices.includes(state.taskSource)) state.taskSource="";
   $("#task-source").innerHTML='<option value="">全部来源</option>'+sourceChoices.map(source=>`<option value="${source}" ${state.taskSource===source?'selected':''}>${esc(sourceLabel(source))}</option>`).join('');
@@ -297,6 +318,7 @@ const reminderProfiles = {
   "boya-signout": { name: "博雅签退提醒", icon: "bi-box-arrow-right", summary: "签退结束前检查状态" },
   venue: { name: "体育场馆提醒", icon: "bi-building", summary: "预约开始与结束前提醒" },
   custom: { name: "自定义日程提醒", icon: "bi-sliders", summary: "按日程时间提醒" },
+  "custom-event": { name: "自定义日程提醒", icon: "bi-calendar-event", summary: "仅提醒所选日程" },
 };
 // Each connector owns its second-level types, not a shared three-type template.
 const connectionRuleTypes = {
@@ -350,6 +372,7 @@ function inferRuleProfile(rule) {
 }
 function profileSentence(rule) {
   const profile = inferRuleProfile(rule); const s = rule.profile_settings || {};
+  if (profile === "custom-event") return customReminderSummary(rule);
   if (["course","boya-course"].includes(profile)) { const settings = settingsFromRule(rule, profile); return `${settings.timing === "before_end" ? "课程结束前" : "上课前"} ${settings.advance_minutes} 分钟提醒`; }
   if (boyaCatalogProfiles.has(profile)) return `${boyaProfileNames[profile]}${s.advance_minutes?.length?` · 提前 ${s.advance_minutes.map(durationText).join('、')}`:''}${s.keywords?.length?` · ${s.keywords.join('、')}`:''}`;
   if (profile === "signin") return `${settingsFromRule(rule, profile).check_times.map(checkTimeText).join("、")}检查，未签到提醒`;
@@ -381,7 +404,7 @@ function renderRules() {
     const label = available ? (rule.enabled ? "运行中" : "已停用") : configurable ? "待配置" : "Coming Soon";
     return `<article class="rule-card ${available || configurable ? "" : "coming-soon-card"}" ${available || configurable ? `data-edit-rule="${rule.id}"` : 'aria-disabled="true"'}><span class="row-icon"><i class="bi ${profile.icon}"></i></span><div><strong>${esc(rule.name)}</strong><div class="rule-sentence">${available ? esc(profileSentence(rule)) : configurable ? "重新设置检查时间" : "Coming Soon"}</div></div><div class="rule-actions"><span class="rule-state ${rule.enabled ? "" : "off"}">${label}</span><label class="switch" aria-label="启用${esc(rule.name)}"><input type="checkbox" ${available ? `data-rule-toggle="${rule.id}"` : "disabled"} ${rule.enabled ? "checked" : ""}><span></span></label></div></article>`;
   }).join("") : `<div class="empty"><i class="bi bi-bell"></i><strong>还没有提醒</strong><button class="primary-button" data-new-rule>新建提醒</button></div>`;
-  $("#rule-list").innerHTML += Object.entries(reminderProfiles).filter(([key]) => !activeProfiles.has(key) && !state.data.rules.some((rule) => inferRuleProfile(rule) === key)).map(([, profile]) => `<article class="rule-card coming-soon-card" aria-disabled="true"><span class="row-icon"><i class="bi ${profile.icon}"></i></span><strong>${esc(profile.name)}</strong><span class="coming-soon-badge">Coming Soon</span></article>`).join("");
+  $("#rule-list").innerHTML += Object.entries(reminderProfiles).filter(([key]) => !["custom","custom-event"].includes(key) && !activeProfiles.has(key) && !state.data.rules.some((rule) => inferRuleProfile(rule) === key)).map(([, profile]) => `<article class="rule-card coming-soon-card" aria-disabled="true"><span class="row-icon"><i class="bi ${profile.icon}"></i></span><strong>${esc(profile.name)}</strong><span class="coming-soon-badge">Coming Soon</span></article>`).join("");
   $$('[data-edit-rule]').forEach((card) => card.addEventListener("click", (event) => { if (!event.target.closest(".switch")) openRuleDialog(state.data.rules.find((r) => r.id === Number(card.dataset.editRule))); }));
   $$('[data-rule-toggle]').forEach((input) => input.addEventListener("change", async () => { try { await api(`/api/rules/${input.dataset.ruleToggle}`, { method: "PATCH", body: JSON.stringify({ enabled: input.checked }) }); await loadDashboard(); toast("规则已保存"); } catch { input.checked = !input.checked; toast("保存失败"); } }));
   $$('[data-new-rule]').forEach((button) => button.addEventListener("click", () => openRuleDialog()));
@@ -637,6 +660,7 @@ function checkTimePoint(timing, minutes) {
   return {anchor: ["at_end", "before_end"].includes(timing) ? "ends_at" : "starts_at", offset_minutes: timing === "at_end" ? 0 : timing === "after_start" ? minutes : -minutes};
 }
 function openRuleDialog(rule = null) {
+  if (rule?.profile === "custom-event") { openCustomEventDialog(rule.scope.event_ids[0]); return; }
   if (rule?.available === false && rule.availability !== "needs_configuration") { toast("Coming Soon"); return; }
   const form = $("#rule-form"); form.reset(); $("#action-list").innerHTML = ""; $("#rule-error").textContent = "";
   const editing = rule && Number.isInteger(rule.id); form.elements.rule_id.value = editing ? rule.id : ""; form.elements.rule_enabled.value = editing ? String(rule.enabled) : "true"; $("#rule-dialog-title").textContent = editing ? "编辑提醒规则" : "新建提醒规则"; $("#delete-rule-button").hidden = !editing;
@@ -741,9 +765,8 @@ function bindEvents() {
   $("#user-button").addEventListener("click", () => navigate("account"));
   $$('[data-view]').forEach((button) => button.addEventListener("click", () => { state.view = button.dataset.view; renderCalendar(); updatePeriodTitle(); }));
   $("#previous-period").addEventListener("click", () => movePeriod(-1)); $("#next-period").addEventListener("click", () => movePeriod(1)); $("#today-button").addEventListener("click", () => { state.cursor = new Date(); weekDisplay.selectedDay=null; if (state.page === "today") renderToday(); else renderCalendar(); updatePeriodTitle(); });
-  $("#add-button").addEventListener("click", () => $("#event-dialog").showModal());
+  bindCustomEventControls();
   $$('[data-close]').forEach((button) => button.addEventListener("click", () => $(`#${button.dataset.close}`).close()));
-  $("#event-form").addEventListener("submit", async (event) => { event.preventDefault(); const formElement = event.currentTarget; const formData = new FormData(formElement); const values = Object.fromEntries(formData); ["starts_at","ends_at","due_at"].forEach((key) => { if (values[key]) values[key] = new Date(values[key]).toISOString(); else delete values[key]; }); values.all_day = formData.has("all_day"); if (!values.location) delete values.location; try { await api("/api/events", { method: "POST", body: JSON.stringify(values) }); $("#event-dialog").close(); formElement.reset(); await loadDashboard(); toast("日程已保存"); } catch { toast("保存失败"); } });
   $("#school-form").addEventListener("submit", async (event) => { event.preventDefault(); const formElement = event.currentTarget; const formData = new FormData(formElement); const values = Object.fromEntries(formData); values.remember_password = formData.has("remember_password"); if (!values.captcha) delete values.captcha; try { const result = await api("/api/school/login", { method: "POST", body: JSON.stringify(values) }); if (result.captcha_required) { $("#captcha-field").hidden = false; $("#captcha-image").src = `/api/school/captcha/${encodeURIComponent(result.captcha_id)}?network_mode=${values.network_mode || "direct"}&t=${Date.now()}`; return; } $("#school-dialog").close(); formElement.reset(); await loadDashboard(); toast(result.network_mode === "webvpn" ? "学校 WebVPN 已登录" : result.school?.status === "connected" ? "北航账号已连接" : (result.school?.detail || "教务授权未完成")); } catch (e) { $("#school-error").textContent = e.message; } });
   $$('[data-alert-tab]').forEach((button) => button.addEventListener("click", () => { $$('[data-alert-tab]').forEach((item) => item.classList.toggle("active", item === button)); $$('[data-alert-panel]').forEach((panel) => panel.classList.toggle("active", panel.dataset.alertPanel === button.dataset.alertTab)); }));
   $("#add-rule-button").addEventListener("click", () => openRuleDialog()); $("#add-action").addEventListener("click", () => addActionRow());

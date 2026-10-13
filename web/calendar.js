@@ -52,7 +52,10 @@ function renderMobileWeek(days) {
   }).join('');
   const pinned=visibleCalendarEvents().filter(event=>weekPinned(event)&&sameDay(weekPinnedDate(event),day)).sort((a,b)=>weekPinnedDate(a)-weekPinnedDate(b));
   const timed=weekDayLayout(day).map(item=>item.event);
-  const rows=[...pinned,...timed].map(event=>`<button type="button" class="mobile-day-event ${weekPinned(event)?'deadline':'lesson'}" data-calendar-event="${event.id}"><span class="mobile-event-time">${weekPinned(event)?event.all_day&&event.kind!=='assignment'?'全天':fmtTime(event.due_at||anchor(event)):eventTimeRange(event)}</span><span class="mobile-event-main"><strong>${esc(event.title)}</strong>${eventDetails(event)?`<small>${esc(eventDetails(event))}</small>`:''}<small>${esc(sourceLabel(event.source))} · ${esc(statusLabel(event))}${attendanceLabel(event)?` · ${esc(attendanceLabel(event))}`:''}</small></span><i class="bi bi-chevron-right" aria-hidden="true"></i></button>`).join('');
+  const rows=[...pinned,...timed].map(event=>{
+    const details=eventDetails(event,{includeAttendance:false});
+    return `<button type="button" class="mobile-day-event ${weekPinned(event)?'deadline':'lesson'}" data-calendar-event="${event.id}"><span class="mobile-event-time">${weekPinned(event)?event.all_day&&event.kind!=='assignment'?'全天':fmtTime(event.due_at||anchor(event)):eventTimeRange(event)}</span><span class="mobile-event-main"><strong>${esc(event.title)}</strong>${details?`<small>${esc(details)}</small>`:''}<small>${esc(sourceLabel(event.source))} · ${esc(statusLabel(event))}</small>${attendanceBadge(event)}</span><i class="bi bi-chevron-right" aria-hidden="true"></i></button>`;
+  }).join('');
   return `<div class="mobile-week"><div class="mobile-week-strip" role="group" aria-label="选择本周日期">${strip}</div><div class="mobile-day-heading"><strong>${fmtDate(day,{month:'long',day:'numeric',weekday:'long'})}</strong><span>${pinned.length+timed.length} 项</span></div><div class="mobile-day-list">${rows||'<div class="empty"><i class="bi bi-calendar-check"></i><strong>当天没有日程</strong></div>'}</div></div>`;
 }
 
