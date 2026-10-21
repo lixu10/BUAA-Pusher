@@ -61,9 +61,9 @@ Windows 脚本会依次探测 `python`、`python3`、`py -3`。Conda 环境无�
 docker compose up -d --build
 ```
 
-打开 <http://localhost:11451>。默认仅绑定本机，数据与自动生成的随机密钥保存在 Docker 命名卷，不读取开发机的 `./data`。首次部署无需创建配置文件。
+打开 <http://localhost:11451>，或使用 `http://服务器公网IP:11451`。默认绑定 `0.0.0.0:11451`，云服务器还需在安全组／防火墙放行 TCP 11451。数据与自动生成的随机密钥保存在 Docker 命名卷，不读取开发机的 `./data`。首次部署无需创建配置文件。
 
-需要修改端口或配置时，复制 `.env.compose.example` 为 `.env.compose`，使用 `docker compose --env-file .env.compose up -d --build`。主机端口通过 `PUAA_COMPOSE_PORT` 配置，与本地 Python 的 `PUAA_PORT` 分离。公网部署需要 HTTPS 与 `PUAA_SECURE_COOKIES=true`。
+需要修改端口或配置时，复制 `.env.compose.example` 为 `.env.compose`，使用 `docker compose --env-file .env.compose up -d --build`。主机端口通过 `PUAA_COMPOSE_PORT` 配置，与本地 Python 的 `PUAA_PORT` 分离。仅需宿主机反向代理访问时设 `PUAA_BIND_HOST=127.0.0.1`。HTTP 不加密登录信息，正式使用学校账号前应配置 HTTPS，并在 HTTPS 部署时启用 `PUAA_SECURE_COOKIES=true`。
 
 详细操作、更新与数据保管见 [部署说明](docs/DEPLOYMENT.md)。本轮未在本地构建或运行 Docker。
 

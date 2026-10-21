@@ -37,13 +37,18 @@ class ReleaseTest(unittest.TestCase):
 
     def test_compose_defaults_and_durable_storage(self):
         compose = (ROOT / "docker-compose.yml").read_text()
-        self.assertIn("${PUAA_COMPOSE_PORT:-11451}:8000", compose)
+        self.assertIn("${PUAA_BIND_HOST:-0.0.0.0}:${PUAA_COMPOSE_PORT:-11451}:8000", compose)
+        self.assertNotIn("${PUAA_BIND_HOST:-127.0.0.1}", compose)
         self.assertNotIn("${PUAA_PORT", compose)
         self.assertIn("puaa_data:/app/data", compose)
         self.assertNotIn("./data:", compose)
         self.assertIn("healthcheck:", compose)
         self.assertIn("read_only: true", compose)
-        self.assertIn("127.0.0.1", compose)
+        self.assertIn("http://127.0.0.1:8000/api/health", compose)
+        example = (ROOT / ".env.compose.example").read_text(encoding="utf-8")
+        self.assertIn("PUAA_BIND_HOST=0.0.0.0", example)
+        self.assertIn("PUAA_COMPOSE_PORT=11451", example)
+        self.assertIn("PUAA_MASTER_KEY=\n", example)
 
     def test_docker_context_is_allowlist(self):
         ignore = (ROOT / ".dockerignore").read_text().splitlines()

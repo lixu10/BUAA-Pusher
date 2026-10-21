@@ -11,7 +11,7 @@ services:
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m
     ports:
-      - "${PUAA_BIND_HOST:-127.0.0.1}:${PUAA_COMPOSE_PORT:-11451}:8000"
+      - "${PUAA_BIND_HOST:-0.0.0.0}:${PUAA_COMPOSE_PORT:-11451}:8000"
     environment:
       PUAA_HOST: 0.0.0.0
       PUAA_PORT: 8000
