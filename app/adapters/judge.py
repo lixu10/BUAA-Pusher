@@ -110,12 +110,12 @@ class JudgeAdapter(SourceAdapter):
             raise AuthenticationRequired("需要登录北航统一认证")
         activation = await self.session.client.get(SERVICE_LOGIN, headers=self.headers)
         self._ensure_html(activation, "JUDGE 授权")
-        courses = self.parse_links(await self._get(COURSES_URL), "courseID", exclude="0")
+        courses = self._read_list(await self._get(COURSES_URL), "courseID", "课程", exclude="0")
         events: list[dict[str, Any]] = []
         completed = total = 0
         for course_id, course_name in courses:
             await self._get(f"{BASE}/courselist.jsp?courseID={course_id}")
-            assignments = self.parse_links(await self._get(ASSIGNMENTS_URL), "assignID")
+            assignments = self._read_list(await self._get(ASSIGNMENTS_URL), "assignID", "作业")
             total += len(assignments)
             for assignment_id, title in assignments:
                 previous = self.previous.get(f"assignment-{course_id}-{assignment_id}")
@@ -174,6 +174,18 @@ class JudgeAdapter(SourceAdapter):
                 seen.add(values[0])
                 result.append((values[0], text))
         return result
+
+    @classmethod
+    def _read_list(cls, html: str, query_key: str, label: str, exclude: str | None = None) -> list[tuple[str, str]]:
+        items = cls.parse_links(html, query_key, exclude)
+        if not items:
+            parser = _AnchorParser()
+            parser.feed(html)
+            text = parser.plain_text
+            empty = re.search(rf"(?:暂无|没有|尚无|未加入|未选|未发布)[^。！\n]{{0,16}}{label}|{label}[^。！\n]{{0,16}}(?:为空|暂无|不存在)", text)
+            if not empty:
+                raise RuntimeError(f"JUDGE 未返回可确认的{label}列表，旧数据已保留")
+        return items
 
     def _event(self, course_id: str, course_name: str, assignment_id: str, title: str, html: str) -> dict[str, Any]:
         parser = _AnchorParser()

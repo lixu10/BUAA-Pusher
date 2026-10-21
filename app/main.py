@@ -38,7 +38,7 @@ from app.services.school_recovery import SchoolAuthRecovery
 from app.services.source_health import source_transition_message
 from app.services.worker import BackgroundWorker
 from app.services.boya import catalog_options, enrollment_state, filter_matches, record_catalog
-from app.upstream.sso import LoginFailed, AuthenticationRequired
+from app.upstream.sso import LoginFailed, AuthenticationFlowError, AuthenticationRequired
 
 
 SESSION_COOKIE = "puaa_session"
@@ -502,6 +502,8 @@ async def school_login(payload: SchoolLoginRequest, user: dict[str, Any] = Depen
     try:
         async with school_recovery.lock(user["id"], payload.network_mode):
             status = await upstream.login(payload.username, payload.password, payload.captcha)
+    except AuthenticationFlowError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except LoginFailed as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except Exception as exc:

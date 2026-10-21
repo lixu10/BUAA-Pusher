@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 
 from app.services.school_recovery import SchoolAuthRecovery
-from app.upstream.sso import AuthenticationRequired, LoginFailed
+from app.upstream.sso import AuthenticationFlowError, AuthenticationRequired, LoginFailed
 
 
 def session(mode="direct", authenticated=True):
@@ -133,8 +133,7 @@ class RecoveryTest(unittest.IsolatedAsyncioTestCase):
         async def validated(*args,**kwargs):
             school.user={}; return {"authenticated":True,"user":{}}
         try:
-            with patch.object(school.client,"post",AsyncMock(return_value=httpx.Response(200,text="ok"))), \
-                 patch.object(school.client,"get",AsyncMock()), \
+            with patch.object(school,"_auth_request",AsyncMock(return_value=httpx.Response(200,text="ok"))), \
                  patch.object(school,"refresh_status",AsyncMock(side_effect=validated)):
                 await school.login("fixture","fixture")
             self.assertIsNone(school.reauthentication_error)
@@ -161,6 +160,30 @@ class RecoveryTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1,school.login.await_count); operation.assert_not_awaited()
             school.user={}; school.reauthentication_error=None  # Explicit successful login.
             self.assertEqual([],await recovery.run(1,school,operation,lambda:None))
+
+    async def test_exchange_failure_uses_safe_message_and_temporary_cooldown_not_password_block(self):
+        school, recovery = session(authenticated=False), SchoolAuthRecovery()
+        school.login.side_effect = AuthenticationFlowError("private-ticket-fixture")
+        operation = AsyncMock(return_value=[])
+        with patch("app.services.school_recovery.time.monotonic", return_value=100):
+            for _ in range(3):
+                with self.assertRaises(AuthenticationRequired) as caught:
+                    await recovery.run(1,school,operation,lambda:("fixture","fixture"))
+                self.assertIn("用户中心会话",str(caught.exception))
+                self.assertNotIn("private-ticket-fixture",str(caught.exception))
+                self.assertNotIn("确认密码",str(caught.exception))
+        self.assertEqual(1,school.login.await_count)
+        self.assertEqual(160,school.reauthentication_retry_at)
+        self.assertEqual({},school._form)
+        self.assertIsNone(school._captcha_id)
+        operation.assert_not_awaited()
+        async def success(*args):
+            school.user={};school.reauthentication_error=None;school.reauthentication_retry_at=None
+            return {"authenticated":True}
+        school.login.side_effect=success
+        with patch("app.services.school_recovery.time.monotonic",return_value=161):
+            self.assertEqual([],await recovery.run(1,school,operation,lambda:("fixture","fixture")))
+        self.assertEqual(2,school.login.await_count)
 
     async def test_second_auth_failure_does_not_loop_and_throttles_following_sources(self):
         recovery, school = SchoolAuthRecovery(), session()

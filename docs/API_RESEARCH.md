@@ -1,5 +1,14 @@
 # 北航 API 调研记录
 
+## 2026-10-21 统一认证与用户中心票据交换修复
+
+- 原版在真实只读诊断中复现：SSO 提交后进入用户中心，但 UC `/api/login` 返回 `http://sso.buaa.edu.cn/login?service=...`；原生客户端不继承浏览器 HSTS，UC 会话建立失败。不能据此提示密码错误，也不能将 HTTP 200 当作登录成功。
+- 对照 [UBAA 当日认证修复](https://github.com/BUAASubnet/UBAA/commit/65000130309a4a819675d7774b33bdeb7f4d2cc7) 及其公开审计，新增限域、最多10次的显式认证跳转；仅将外层 SSO 默认80端口升级至 HTTPS，原样保留嵌套 `service` 编码。WebVPN 跳转先解包、升级、再经学校网关发送，不扩展为任意代理。
+- 完成 UC ticket 回调和 Cookie 保存后，以 `/api/uc/status` 的 `code=0` 及用户对象判断认证成功。已有有效 SSO 可恢复，但不能把另一个学校账号的会话当作本次登录成功；切换时只清理本地 Cookie，不调用学校退出。
+- 外域／异常端口跳转与跨地址307/308凭据重放均停止；TLS验证保持开启。认证交换异常返回503，自动认证仅短暂冷却60秒，不再伪装密码拒绝并永久阻断后续尝试；真正的凭据拒绝、验证码仍要求手动处理。
+- 真实验证：直连、WebVPN 均通过 UC 会话校验；教务课表与 SPOC 作业完成只读查询。教务曾有一次读取超时，复核恢复；JUDGE WebVPN 页面返回异常短内容，不能证明无课程／作业。新增完整性校验，未知空页面报错并保留旧数据和变更基线，不宣称所有业务均正常。
+- 所有真实验证使用只读本地数据库，学校凭据仅发往学校认证；不保存 Cookie、不输出身份和票据、不覆盖现有日程、不触发通知或学校业务写操作。iClass 未因认证测试而启用或调用。
+
 ## 2026-10-09 全连接 WebVPN 与只读签到恢复
 
 - 重新阅读 UBAA 当前 [SigninClient](https://github.com/BUAASubnet/UBAA/blob/main/server/src/main/kotlin/cn/edu/ubaa/signin/SigninClient.kt)、[Signin DTO](https://github.com/BUAASubnet/UBAA/blob/main/shared/src/commonMain/kotlin/cn/edu/ubaa/model/dto/Signin.kt) 和 [LocalSigninApi](https://github.com/BUAASubnet/UBAA/blob/main/shared/src/commonMain/kotlin/cn/edu/ubaa/api/local/LocalSigninApi.kt)：8346 授权跳转提取 loginName；8347 GET 登录换取 sessionId，GET `get_stu_course_sched.action` 按日期读取状态。`signStatus=0` 未签到、`1` 已签到，其他值未知。只采用只读部分，不接入 UBAA 服务，不实现扫码、定位、签到提交或服务器时间请求。

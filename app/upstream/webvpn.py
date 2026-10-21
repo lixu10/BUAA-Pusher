@@ -12,6 +12,8 @@ import certifi
 import httpx
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from app.upstream.cas import secure_cas_transport_url
+
 
 GATEWAY = "d.buaa.edu.cn"
 HOST_PORTS = {host: {80, 443} for host in (
@@ -129,7 +131,7 @@ class WebVpnClient:
 
     async def request(self, method: str, url: str, **kwargs):
         original = urlsplit(from_webvpn_url(url))
-        current = to_webvpn_url(url)
+        current = to_webvpn_url(secure_cas_transport_url(from_webvpn_url(url)))
         follow = kwargs.pop("follow_redirects", True)
         history = []
         for _ in range(16):
@@ -145,7 +147,7 @@ class WebVpnClient:
                 response.history = history
                 return response
             location = response.headers["location"]
-            target = to_webvpn_url(resolve_upstream_redirect(str(response.url), location))
+            target = to_webvpn_url(secure_cas_transport_url(resolve_upstream_redirect(str(response.url), location)))
             if method == "POST" and response.status_code in {307, 308}:
                 if urlsplit(from_webvpn_url(target))._replace(query="", fragment="") != original._replace(query="", fragment=""):
                     raise ValueError("WebVPN 登录跳转异常，已停止发送凭据")

@@ -402,6 +402,18 @@ class WebVpnSettingsApiTest(unittest.TestCase):
         self.assertEqual("connected", self.db.school_connection(self.user["id"])["status"])
         main.start_sync.assert_not_called()
 
+    def test_auth_exchange_failure_is_503_not_a_password_401(self):
+        from app.upstream.sso import AuthenticationFlowError, LoginFailed
+        self.prepare_school()
+        self.vpn.login.side_effect=AuthenticationFlowError("学校统一认证后的用户中心会话未建立，请稍后重试或手动重新登录")
+        request={"username":"12345678","password":"not-a-real-password","network_mode":"webvpn"}
+        response=self.client.post("/api/school/login",json=request)
+        self.assertEqual(503,response.status_code)
+        self.assertIn("用户中心会话",response.json()["detail"])
+        self.vpn.login.side_effect=LoginFailed("账号或密码错误")
+        self.assertEqual(401,self.client.post("/api/school/login",json=request).status_code)
+        main.start_sync.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

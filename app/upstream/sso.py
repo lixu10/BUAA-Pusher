@@ -4,10 +4,12 @@ import re
 import time
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import certifi
-from app.upstream.webvpn import WebVpnClient, from_webvpn_url
+from app.upstream.cas import secure_cas_transport_url
+from app.upstream.webvpn import GATEWAY, WebVpnClient, from_webvpn_url, resolve_upstream_redirect
 
 
 SSO_URL = "https://sso.buaa.edu.cn/login"
@@ -24,6 +26,10 @@ class AuthenticationRequired(RuntimeError):
 
 class LoginFailed(RuntimeError):
     pass
+
+
+class AuthenticationFlowError(LoginFailed):
+    """A bounded CAS/UC exchange failed, not a rejected account password."""
 
 
 class _LoginFormParser(HTMLParser):
@@ -111,17 +117,80 @@ class BuaaSsoSession:
     def authenticated(self) -> bool:
         return self.user is not None
 
+    def _auth_url(self, url: str) -> str:
+        try:
+            target = secure_cas_transport_url(from_webvpn_url(url))
+            parsed = urlsplit(target)
+            hosts = {"sso.buaa.edu.cn", "uc.buaa.edu.cn"} | ({GATEWAY} if self.network_mode == "webvpn" else set())
+            if parsed.scheme != "https" or parsed.hostname not in hosts or parsed.port not in {None, 443} or parsed.username or parsed.password:
+                raise ValueError()
+            return target
+        except ValueError:
+            raise AuthenticationFlowError("学校认证跳转地址异常，已停止发送凭据") from None
+
+    async def _auth_request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Follow CAS and UC activation with one cookie jar and no HTTP hop."""
+        current = self._auth_url(url)
+        original = urlsplit(current)._replace(query="", fragment="")
+        if method == "POST" and (original.hostname != "sso.buaa.edu.cn" or original.path != "/login"):
+            raise AuthenticationFlowError("学校认证提交地址异常，已停止发送凭据")
+        history = []
+        for _ in range(11):
+            response = await self.client.request(method, current, follow_redirects=False, **kwargs)
+            if not response.is_redirect:
+                response.history = history
+                return response
+            location = response.headers.get("location")
+            if not location or len(history) >= 10:
+                raise AuthenticationFlowError("学校认证跳转未完成或次数过多，请稍后重试")
+            try:
+                target = self._auth_url(resolve_upstream_redirect(str(response.url), location))
+            except ValueError:
+                raise AuthenticationFlowError("学校认证跳转地址异常，已停止发送凭据") from None
+            if method == "POST" and response.status_code in {307, 308}:
+                if urlsplit(target)._replace(query="", fragment="") != original:
+                    raise AuthenticationFlowError("学校认证跳转异常，已停止转发凭据")
+            elif response.status_code == 303 or method == "POST" and response.status_code in {301, 302}:
+                method = "GET"
+                for key in ("data", "json", "content"):
+                    kwargs.pop(key, None)
+            kwargs.pop("params", None)
+            history.append(response)
+            current = target
+        raise AuthenticationFlowError("学校认证跳转次数过多，请稍后重试")
+
+    async def _activate_user_center(self) -> dict[str, Any]:
+        await self._auth_request("GET", UC_LOGIN_URL)
+        status = await self.refresh_status(strict=True)
+        if not status["authenticated"]:
+            self._form = {}
+            raise AuthenticationFlowError("学校统一认证后的用户中心会话未建立，请稍后重试或手动重新登录")
+        return status
+
+    def _finish_login(self, username: str, status: dict[str, Any]) -> dict[str, Any]:
+        self.username = username
+        self._form = {}
+        self.reauthentication_error = None
+        self.reauthentication_retry_at = None
+        self.last_authenticated_at = time.monotonic()
+        return status
+
     async def preload(self) -> dict[str, Any]:
-        response = await self.client.get(SSO_URL)
-        response.raise_for_status()
+        response = await self._auth_request("GET", SSO_URL)
+        if urlsplit(from_webvpn_url(str(response.url))).hostname == "sso.buaa.edu.cn":
+            response.raise_for_status()
         self._form = parse_login_form(response.text)
         self._captcha_id = parse_captcha_id(response.text)
+        if not self._form.get("execution"):
+            status = await self._activate_user_center()
+            return {**status, "captcha_required": False, "captcha_id": None}
         if self.network_mode == "webvpn":
-            from urllib.parse import urlsplit
             target = urlsplit(from_webvpn_url(str(response.url)))
             if target.hostname != "sso.buaa.edu.cn" or target.path != "/login" or not self._form.get("execution"):
-                raise LoginFailed("学校 WebVPN 登录入口不可用，请稍后重试")
+                raise AuthenticationFlowError("学校 WebVPN 登录入口不可用，请稍后重试")
             self._login_url = str(response.url)
+        else:
+            self._login_url = self._auth_url(str(response.url))
         return {
             "captcha_required": self._captcha_id is not None,
             "captcha_id": self._captcha_id,
@@ -136,7 +205,21 @@ class BuaaSsoSession:
         if self.username != username:
             self.iclass_identity = None
         if not self._form:
-            await self.preload()
+            restored = await self.preload()
+            if restored.get("authenticated"):
+                identity = restored.get("user") or {}
+                school_id = identity.get("schoolid") or identity.get("schoolId") or identity.get("school_id")
+                if str(school_id) == username or not school_id and self.username == username:
+                    return self._finish_login(username, restored)
+                # Do not reuse another account's cookies when an explicit login
+                # switches identity. This clears only local cookies, not logout.
+                self.client.cookies.clear()
+                self.user = None
+                self._form = {}
+                await self.preload()
+                if not self._form:
+                    self.user = None
+                    raise AuthenticationFlowError("学校认证账号无法确认，请重新连接学校账号")
         if self._captcha_id and not captcha:
             return {"authenticated": False, "captcha_required": True, "captcha_id": self._captcha_id}
 
@@ -151,7 +234,8 @@ class BuaaSsoSession:
         if captcha:
             form["captcha"] = captcha
             form["captchaResponse"] = captcha
-        response = await self.client.post(self._login_url, data=form)
+        self.user = None
+        response = await self._auth_request("POST", self._login_url, data=form)
         error = parse_login_error(response.text)
         if error or ("name=\"execution\"" in response.text and "password" in response.text.lower()):
             self._form = {}
@@ -161,22 +245,13 @@ class BuaaSsoSession:
             expiry_form = parse_login_form(response.text)
             execution = expiry_form.get("execution")
             if execution:
-                await self.client.post(str(response.url).split("?", 1)[0], data={
+                await self._auth_request("POST", str(response.url).split("?", 1)[0], data={
                     "execution": execution,
                     "_eventId": "ignoreAndContinue",
                 })
 
-        await self.client.get(UC_LOGIN_URL)
-        status = await self.refresh_status(strict=True)
-        if not status["authenticated"]:
-            self._form = {}
-            raise LoginFailed("统一认证成功，但用户中心会话校验失败")
-        self.username = username
-        self._form = {}
-        self.reauthentication_error = None
-        self.reauthentication_retry_at = None
-        self.last_authenticated_at = time.monotonic()
-        return status
+        status = await self._activate_user_center()
+        return self._finish_login(username, status)
 
     async def refresh_status(self, strict: bool = False) -> dict[str, Any]:
         try:
@@ -187,7 +262,7 @@ class BuaaSsoSession:
             if strict and response.status_code not in {200, 401, 403}:
                 response.raise_for_status()
             payload = response.json()
-            if response.status_code == 200 and payload.get("code") == 0 and isinstance(payload.get("data"), dict):
+            if response.status_code == 200 and isinstance(payload, dict) and payload.get("code") == 0 and isinstance(payload.get("data"), dict):
                 self.user = payload["data"]
                 return {"authenticated": True, "user": self.user}
         except httpx.HTTPError:

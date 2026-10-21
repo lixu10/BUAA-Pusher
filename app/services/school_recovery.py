@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import time
 
-from app.upstream.sso import AuthenticationRequired, LoginFailed
+from app.upstream.sso import AuthenticationFlowError, AuthenticationRequired, LoginFailed
 
 
 class SchoolAuthRecovery:
@@ -41,6 +41,12 @@ class SchoolAuthRecovery:
         username, password = secret
         try:
             status = await session.login(username, password)
+        except AuthenticationFlowError as exc:
+            session._form = {}
+            session._captcha_id = None
+            session.reauthentication_error = "学校认证跳转或用户中心会话建立失败，旧数据已保留，请稍后重试"
+            session.reauthentication_retry_at = time.monotonic() + 60
+            raise AuthenticationRequired(session.reauthentication_error) from exc
         except LoginFailed as exc:
             # Never persist upstream text, credentials or authentication URLs.
             session.reauthentication_error = "学校自动认证失败，请手动重新登录确认密码或验证要求"
